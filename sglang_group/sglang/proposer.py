@@ -39,6 +39,11 @@ class BaseProposal:
     draft_context_tokens: int
     alignment_cost: float | None = None
     proposal_cache_event: str = "skip"
+    tokenizer_bridge: str | None = None
+    cuda_event: object | None = None
+    cuda_overlap: bool = False
+    target_tree_token_ids: tuple[int, ...] = ()
+    target_tree_parent_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,9 @@ class ProposalCacheKey:
     add_special_tokens: bool
     assistant_lookbehind: int
     target_lookbehind: int
+    tokenizer_bridge: str
+    tree_branch_factor: int
+    tree_max_depth: int | None
 
 
 @dataclass
@@ -86,6 +94,12 @@ class DraftProposerStats:
     proposal_cache_stores: int = 0
     proposal_cache_evictions: int = 0
     proposal_cache_skips: int = 0
+    bridge_uag_translations: int = 0
+    bridge_segment_translations: int = 0
+    bridge_empty_translations: int = 0
+    tli_intersection_size: int = 0
+    tree_proposals: int = 0
+    tree_nodes: int = 0
 
     def snapshot(self) -> dict[str, int]:
         return {
@@ -106,6 +120,12 @@ class DraftProposerStats:
             "proposal_cache_stores": self.proposal_cache_stores,
             "proposal_cache_evictions": self.proposal_cache_evictions,
             "proposal_cache_skips": self.proposal_cache_skips,
+            "bridge_uag_translations": self.bridge_uag_translations,
+            "bridge_segment_translations": self.bridge_segment_translations,
+            "bridge_empty_translations": self.bridge_empty_translations,
+            "tli_intersection_size": self.tli_intersection_size,
+            "tree_proposals": self.tree_proposals,
+            "tree_nodes": self.tree_nodes,
         }
 
 
@@ -211,6 +231,7 @@ class HeterogeneousDraftProposer:
                 proposal = self._propose_itl(
                     rid,
                     current_text,
+                    current_target_ids,
                     context_ids=context_ids,
                     max_target_tokens=max_target_tokens,
                 )
@@ -284,6 +305,7 @@ class HeterogeneousDraftProposer:
         self,
         rid: str,
         current_text: str,
+        current_target_ids: Sequence[int],
         *,
         context_ids: Sequence[int] | None = None,
         max_target_tokens: int,
@@ -300,6 +322,7 @@ class HeterogeneousDraftProposer:
         generation_ids = list(state.input_ids)
         generation_past = self._fork_past_key_values(state.past_key_values)
         logits = state.next_token_logits
+        root_logits = logits
         context_len = len(state.input_ids)
 
         try:
@@ -308,8 +331,11 @@ class HeterogeneousDraftProposer:
                     next_token = int(torch.argmax(logits, dim=-1)[0])
                     draft_ids.append(next_token)
 
-                    draft_text = self._decode(self.draft_tokenizer, draft_ids)
-                    proxy_ids = self._encode(self.target_tokenizer, draft_text)
+                    proxy_ids = self._bridge_assistant_tokens_to_target(
+                        current_target_ids=current_target_ids,
+                        assistant_context_ids=state.input_ids,
+                        assistant_new_ids=draft_ids,
+                    )
                     if len(proxy_ids) >= max_target_tokens:
                         break
 
@@ -328,6 +354,13 @@ class HeterogeneousDraftProposer:
             self._rollback_past_key_values(generation_past)
 
         proxy_ids = proxy_ids[:max_target_tokens]
+        tree_token_ids, tree_parent_indices = self._tree_from_greedy_with_root_siblings(
+            root_logits=root_logits,
+            greedy_target_ids=proxy_ids,
+            current_target_ids=current_target_ids,
+            assistant_context_ids=state.input_ids,
+            max_target_tokens=max_target_tokens,
+        )
         return BaseProposal(
             method="itl",
             draft_token_ids=tuple(draft_ids),
@@ -336,6 +369,9 @@ class HeterogeneousDraftProposer:
             cache_event=cache_event,
             draft_context_tokens=len(state.input_ids),
             alignment_cost=self._alignment_cost(draft_ids, proxy_ids),
+            tokenizer_bridge=self.config.tokenizer_bridge,
+            target_tree_token_ids=tree_token_ids,
+            target_tree_parent_indices=tree_parent_indices,
         )
 
     def _propose_slem(
@@ -359,6 +395,7 @@ class HeterogeneousDraftProposer:
         generation_ids = list(state.input_ids)
         generation_past = self._fork_past_key_values(state.past_key_values)
         logits = state.next_token_logits
+        root_logits = logits
         context_len = len(state.input_ids)
 
         try:
@@ -393,13 +430,24 @@ class HeterogeneousDraftProposer:
         finally:
             self._rollback_past_key_values(generation_past)
 
+        target_token_ids = tuple(int(token_id) for token_id in proxy_ids[:max_target_tokens])
+        tree_token_ids, tree_parent_indices = self._tree_from_greedy_with_root_siblings(
+            root_logits=root_logits,
+            greedy_target_ids=target_token_ids,
+            current_target_ids=current_target_ids,
+            assistant_context_ids=state.input_ids,
+            max_target_tokens=max_target_tokens,
+        )
         return BaseProposal(
             method="itl-base-slem",
             draft_token_ids=tuple(draft_ids),
-            target_token_ids=tuple(int(token_id) for token_id in proxy_ids[:max_target_tokens]),
+            target_token_ids=target_token_ids,
             draft_prob_rows=None,
             cache_event=cache_event,
             draft_context_tokens=len(state.input_ids),
+            tokenizer_bridge="uag",
+            target_tree_token_ids=tree_token_ids,
+            target_tree_parent_indices=tree_parent_indices,
         )
 
     def _propose_tli(
@@ -470,6 +518,9 @@ class HeterogeneousDraftProposer:
             draft_prob_rows=prob_rows,
             cache_event=cache_event,
             draft_context_tokens=len(state.input_ids),
+            tokenizer_bridge="tli",
+            target_tree_token_ids=tuple(target_ids),
+            target_tree_parent_indices=_linear_tree_parent_indices(len(target_ids)),
         )
 
     def _sample_tli_token(self, logits, *, sampling: SamplingRequest):
@@ -530,6 +581,7 @@ class HeterogeneousDraftProposer:
                 self.intersection.target_vocab_size,
                 len(self.intersection.assistant_ids),
             )
+            self.stats.tli_intersection_size = len(self.intersection.assistant_ids)
 
         if self._valid_assistant_ids is None or self._valid_target_ids is None:
             device = self._input_device()
@@ -738,6 +790,9 @@ class HeterogeneousDraftProposer:
             add_special_tokens=bool(self.config.add_special_tokens),
             assistant_lookbehind=int(self.config.assistant_lookbehind),
             target_lookbehind=int(self.config.target_lookbehind),
+            tokenizer_bridge=str(self.config.tokenizer_bridge),
+            tree_branch_factor=int(getattr(self.config, "tree_branch_factor", 1) or 1),
+            tree_max_depth=getattr(self.config, "tree_max_depth", None),
         )
 
     def _store_proposal_cache(
@@ -757,6 +812,102 @@ class HeterogeneousDraftProposer:
         while len(self._proposal_cache) > limit:
             self._proposal_cache.popitem(last=False)
             self.stats.proposal_cache_evictions += 1
+
+    def _bridge_assistant_tokens_to_target(
+        self,
+        *,
+        current_target_ids: Sequence[int],
+        assistant_context_ids: Sequence[int],
+        assistant_new_ids: Sequence[int],
+    ) -> tuple[int, ...]:
+        if self.config.tokenizer_bridge == "segment":
+            self.stats.bridge_segment_translations += 1
+            target_ids = self._encode(
+                self.target_tokenizer,
+                self._decode(self.draft_tokenizer, assistant_new_ids),
+            )
+        else:
+            self.stats.bridge_uag_translations += 1
+            target_ids = slem_target_proxies_from_assistant_window(
+                target_tokenizer=self.target_tokenizer,
+                assistant_tokenizer=self.draft_tokenizer,
+                current_target_ids=current_target_ids,
+                assistant_context_ids=assistant_context_ids,
+                assistant_new_ids=assistant_new_ids,
+                assistant_lookbehind=self.config.assistant_lookbehind,
+                target_lookbehind=self.config.target_lookbehind,
+                add_special_tokens=self.config.add_special_tokens,
+            )
+        if not target_ids:
+            self.stats.bridge_empty_translations += 1
+        return tuple(int(token_id) for token_id in target_ids)
+
+    def _tree_from_greedy_with_root_siblings(
+        self,
+        *,
+        root_logits,
+        greedy_target_ids: Sequence[int],
+        current_target_ids: Sequence[int],
+        assistant_context_ids: Sequence[int],
+        max_target_tokens: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        greedy = tuple(int(token_id) for token_id in greedy_target_ids[:max_target_tokens])
+        tokens: list[int] = list(greedy)
+        parents: list[int] = list(_linear_tree_parent_indices(len(greedy)))
+
+        branch_factor = int(getattr(self.config, "tree_branch_factor", 1) or 1)
+        if branch_factor <= 1 or max_target_tokens <= 1:
+            return tuple(tokens), tuple(parents)
+
+        max_depth = getattr(self.config, "tree_max_depth", None)
+        if max_depth is not None:
+            max_depth = max(1, int(max_depth))
+            keep = min(len(tokens), max_depth)
+            tokens = tokens[:keep]
+            parents = parents[:keep]
+
+        budget = max(0, max_target_tokens - len(tokens))
+        if budget <= 0:
+            return tuple(tokens), tuple(parents)
+
+        for assistant_id in self._topk_assistant_ids(root_logits, branch_factor):
+            if not budget:
+                break
+            branch = self._bridge_assistant_tokens_to_target(
+                current_target_ids=current_target_ids,
+                assistant_context_ids=assistant_context_ids,
+                assistant_new_ids=(assistant_id,),
+            )
+            if not branch:
+                continue
+            if greedy and int(branch[0]) == int(greedy[0]):
+                continue
+
+            parent_index = 0
+            for token_id in branch:
+                if not budget:
+                    break
+                tokens.append(int(token_id))
+                parents.append(parent_index)
+                parent_index = len(tokens)
+                budget -= 1
+
+        if len(tokens) > len(greedy):
+            self.stats.tree_proposals += 1
+            self.stats.tree_nodes += len(tokens)
+        return tuple(tokens), tuple(parents)
+
+    @staticmethod
+    def _topk_assistant_ids(logits, k: int) -> tuple[int, ...]:
+        import torch
+
+        if k <= 0:
+            return ()
+        values = logits[0]
+        k = min(int(k), int(values.numel()))
+        if k <= 0:
+            return ()
+        return tuple(int(token_id) for token_id in torch.topk(values, k=k).indices.tolist())
 
     def _count_method_proposal(self, method: str) -> None:
         if method == "itl":
@@ -889,6 +1040,10 @@ def _hash_ints(token_ids: Sequence[int]) -> str:
     for token_id in token_ids:
         digest.update(int(token_id).to_bytes(8, "little", signed=True))
     return digest.hexdigest()
+
+
+def _linear_tree_parent_indices(length: int) -> tuple[int, ...]:
+    return tuple(range(max(0, int(length))))
 
 
 def _normalize_float(value: float) -> float:

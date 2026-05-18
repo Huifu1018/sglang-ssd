@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sglang-group"
 version = "0.1.0"
-description = "Unified SGLang 0.5.9 integration for heterogeneous-vocabulary speculative decoding methods"
+description = "SSD-style SGLang 0.5.9 integration for heterogeneous-vocabulary speculative decoding"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -16,9 +16,9 @@ authors = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/Huifu1018/sglang-group"
-Repository = "https://github.com/Huifu1018/sglang-group"
-Issues = "https://github.com/Huifu1018/sglang-group/issues"
+Homepage = "https://github.com/Huifu1018/sglang-ssd"
+Repository = "https://github.com/Huifu1018/sglang-ssd"
+Issues = "https://github.com/Huifu1018/sglang-ssd/issues"
 
 [project.optional-dependencies]
 sglang = [

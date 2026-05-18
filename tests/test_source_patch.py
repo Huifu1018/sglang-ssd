@@ -77,6 +77,21 @@ def validate_lora(self):
 '''
 
 
+OUTPUT_PROCESSOR_059 = '''class SchedulerOutputProcessorMixin:
+    def process_batch_result_prefill(self, batch, result):
+        self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
+
+        if self.current_scheduler_metrics_enabled:
+            self.log_prefill_stats(prefill_stats=batch.prefill_stats)
+
+    def process_batch_result_decode(self, batch, result):
+        self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
+
+        self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
+'''
+
+
 class SourcePatchTests(unittest.TestCase):
     def test_applies_source_integration_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -85,7 +100,7 @@ class SourcePatchTests(unittest.TestCase):
             report = apply_source_integration(root)
 
             self.assertFalse(report.already_integrated)
-            self.assertEqual(len(report.changed_files), 2)
+            self.assertEqual(len(report.changed_files), 3)
             self.assertTrue(
                 (
                     root / "srt" / "speculative" / "spec_info.py.sglang-group.bak"
@@ -93,6 +108,14 @@ class SourcePatchTests(unittest.TestCase):
             )
             self.assertTrue(
                 (root / "srt" / "server_args.py.sglang-group.bak").exists()
+            )
+            self.assertTrue(
+                (
+                    root
+                    / "srt"
+                    / "managers"
+                    / "scheduler_output_processor_mixin.py.sglang-group.bak"
+                ).exists()
             )
             self.assertTrue(is_source_integrated(root))
 
@@ -107,7 +130,7 @@ class SourcePatchTests(unittest.TestCase):
             report = apply_source_integration(root, dry_run=True)
 
             self.assertFalse(report.already_integrated)
-            self.assertEqual(len(report.changed_files), 2)
+            self.assertEqual(len(report.changed_files), 3)
             self.assertFalse(is_source_integrated_no_raise(root))
 
     def test_resolves_repository_root(self):
@@ -121,8 +144,14 @@ class SourcePatchTests(unittest.TestCase):
 def _write_fake_sglang_tree(root: Path) -> Path:
     spec_dir = root / "srt" / "speculative"
     spec_dir.mkdir(parents=True)
+    managers_dir = root / "srt" / "managers"
+    managers_dir.mkdir(parents=True)
     (spec_dir / "spec_info.py").write_text(SPEC_INFO_059, encoding="utf-8")
     (root / "srt" / "server_args.py").write_text(SERVER_ARGS_059, encoding="utf-8")
+    (managers_dir / "scheduler_output_processor_mixin.py").write_text(
+        OUTPUT_PROCESSOR_059,
+        encoding="utf-8",
+    )
     return root
 
 

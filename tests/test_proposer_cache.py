@@ -12,6 +12,36 @@ from sglang_group.sglang.proposer import (
 )
 
 
+class TinyTokenizer:
+    def __init__(self, vocab):
+        self.vocab = dict(vocab)
+        self.id_to_text = {idx: token for token, idx in self.vocab.items()}
+
+    def decode(self, ids, **kwargs):
+        return "".join(self.id_to_text[int(idx)] for idx in ids)
+
+    def encode(self, text, add_special_tokens=False):
+        ids = []
+        cursor = 0
+        pieces = sorted(
+            ((token, idx) for token, idx in self.vocab.items()),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        while cursor < len(text):
+            for piece, idx in pieces:
+                if text.startswith(piece, cursor):
+                    ids.append(idx)
+                    cursor += len(piece)
+                    break
+            else:
+                cursor += 1
+        return ids
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": self.encode(text, add_special_tokens=add_special_tokens)}
+
+
 class ProposerCacheTests(unittest.TestCase):
     def test_hf_cache_object_is_cloned_not_reused(self):
         class FakeCache:
@@ -169,7 +199,15 @@ class ProposalResultCacheTests(unittest.TestCase):
     def test_evict_removes_matching_proposal_cache_entries(self):
         proposer = self._new_proposer(GroupSGLangConfig(max_cached_proposals=4))
 
-        def fake_itl(self, rid, current_text, *, context_ids=None, max_target_tokens):
+        def fake_itl(
+            self,
+            rid,
+            current_text,
+            current_target_ids,
+            *,
+            context_ids=None,
+            max_target_tokens,
+        ):
             return BaseProposal(
                 "itl",
                 (101,),
@@ -187,6 +225,59 @@ class ProposalResultCacheTests(unittest.TestCase):
 
         self.assertEqual(proposer.proposal_cache_size(), 1)
         self.assertEqual(proposer.stats.proposal_cache_evictions, 1)
+
+    def test_tokenizer_bridge_uses_uag_lookbehind_by_default(self):
+        proposer = self._new_proposer(GroupSGLangConfig(tokenizer_bridge="uag"))
+        proposer.target_tokenizer = TinyTokenizer({"hello": 1, " world": 2, "!": 3})
+        proposer.draft_tokenizer = TinyTokenizer({"hello": 10, " world": 11, "!": 12})
+
+        target_ids = proposer._bridge_assistant_tokens_to_target(
+            current_target_ids=(1,),
+            assistant_context_ids=(10,),
+            assistant_new_ids=(11, 12),
+        )
+
+        self.assertEqual(target_ids, (2, 3))
+        self.assertEqual(proposer.stats.bridge_uag_translations, 1)
+
+    def test_tokenizer_bridge_segment_mode_retokenizes_new_text_only(self):
+        proposer = self._new_proposer(GroupSGLangConfig(tokenizer_bridge="segment"))
+        proposer.target_tokenizer = TinyTokenizer({"hello": 1, " world": 2, "!": 3})
+        proposer.draft_tokenizer = TinyTokenizer({"hello": 10, " world": 11, "!": 12})
+
+        target_ids = proposer._bridge_assistant_tokens_to_target(
+            current_target_ids=(1,),
+            assistant_context_ids=(10,),
+            assistant_new_ids=(11, 12),
+        )
+
+        self.assertEqual(target_ids, (2, 3))
+        self.assertEqual(proposer.stats.bridge_segment_translations, 1)
+
+    def test_tree_builder_adds_root_sibling_from_topk(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        proposer = self._new_proposer(GroupSGLangConfig(tree_branch_factor=2))
+        proposer.target_tokenizer = TinyTokenizer({"hello": 1, " world": 2, "!": 3})
+        proposer.draft_tokenizer = TinyTokenizer({"hello": 10, " world": 11, "!": 12})
+        logits = torch.zeros((1, 16))
+        logits[0, 11] = 10
+        logits[0, 12] = 9
+
+        tokens, parents = proposer._tree_from_greedy_with_root_siblings(
+            root_logits=logits,
+            greedy_target_ids=(2,),
+            current_target_ids=(1,),
+            assistant_context_ids=(10,),
+            max_target_tokens=3,
+        )
+
+        self.assertEqual(tokens, (2, 3))
+        self.assertEqual(parents, (0, 0))
+        self.assertEqual(proposer.stats.tree_proposals, 1)
 
 
 if __name__ == "__main__":

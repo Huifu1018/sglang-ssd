@@ -44,7 +44,20 @@ class LaunchTests(unittest.TestCase):
             "--sglang-group-native-draft-max-requests=2",
             "--sglang-group-max-cached-proposals",
             "16",
+            "--sglang-group-metrics-log-interval=5",
+            "--sglang-group-ssd-mode",
+            "async-sync-fallback",
+            "--sglang-group-ssd-prefetch-workers=2",
+            "--sglang-group-ssd-max-prefetch",
+            "32",
+            "--sglang-group-verify-backend",
+            "triton",
+            "--sglang-group-tokenizer-bridge=uag",
+            "--sglang-group-tree-branch-factor",
+            "4",
+            "--sglang-group-tree-max-depth=3",
             "--sglang-group-enable-native-draft-kv-cache",
+            "--no-sglang-group-cuda-overlap",
             "--no-sglang-group-draft-cache",
             "--no-sglang-group-proposal-cache",
         ]
@@ -59,7 +72,16 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_CACHE_TOKENS"], "8192")
         self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS"], "2")
         self.assertEqual(environ["SGLANG_GROUP_MAX_CACHED_PROPOSALS"], "16")
+        self.assertEqual(environ["SGLANG_GROUP_METRICS_LOG_INTERVAL"], "5")
+        self.assertEqual(environ["SGLANG_GROUP_SSD_MODE"], "async-sync-fallback")
+        self.assertEqual(environ["SGLANG_GROUP_SSD_PREFETCH_WORKERS"], "2")
+        self.assertEqual(environ["SGLANG_GROUP_SSD_MAX_PREFETCH"], "32")
+        self.assertEqual(environ["SGLANG_GROUP_VERIFY_BACKEND"], "triton")
+        self.assertEqual(environ["SGLANG_GROUP_TOKENIZER_BRIDGE"], "uag")
+        self.assertEqual(environ["SGLANG_GROUP_TREE_BRANCH_FACTOR"], "4")
+        self.assertEqual(environ["SGLANG_GROUP_TREE_MAX_DEPTH"], "3")
         self.assertEqual(environ["SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE"], "true")
+        self.assertEqual(environ["SGLANG_GROUP_ENABLE_CUDA_OVERLAP"], "false")
         self.assertEqual(environ["SGLANG_GROUP_ENABLE_DRAFT_CACHE"], "false")
         self.assertEqual(environ["SGLANG_GROUP_ENABLE_PROPOSAL_CACHE"], "false")
 

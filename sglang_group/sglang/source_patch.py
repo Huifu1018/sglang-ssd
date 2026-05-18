@@ -53,11 +53,14 @@ def is_source_integrated(path: str | Path | None = None) -> bool:
     root = resolve_sglang_root(path)
     spec_info = _spec_info_path(root).read_text(encoding="utf-8")
     server_args = _server_args_path(root).read_text(encoding="utf-8")
+    output_processor = _output_processor_path(root).read_text(encoding="utf-8")
     return (
         "SGLANG_GROUP = auto()" in spec_info
         and "def is_sglang_group(self) -> bool:" in spec_info
         and "from sglang_group.sglang.worker import SGLangGroupWorker" in spec_info
         and '"SGLANG_GROUP"' in server_args
+        and "post_process_batch_result_prefill" in output_processor
+        and "post_process_batch_result_decode" in output_processor
     )
 
 
@@ -73,6 +76,7 @@ def apply_source_integration(
 
     spec_info_path = _spec_info_path(root)
     server_args_path = _server_args_path(root)
+    output_processor_path = _output_processor_path(root)
 
     spec_info = spec_info_path.read_text(encoding="utf-8")
     patched_spec_info = _patch_spec_info(spec_info)
@@ -87,6 +91,17 @@ def apply_source_integration(
         changed.append(server_args_path)
         if not dry_run:
             _write_with_backup(server_args_path, server_args, patched_server_args)
+
+    output_processor = output_processor_path.read_text(encoding="utf-8")
+    patched_output_processor = _patch_output_processor(output_processor)
+    if patched_output_processor != output_processor:
+        changed.append(output_processor_path)
+        if not dry_run:
+            _write_with_backup(
+                output_processor_path,
+                output_processor,
+                patched_output_processor,
+            )
 
     return SourcePatchReport(
         sglang_root=root,
@@ -179,6 +194,53 @@ def _patch_server_args(text: str) -> str:
     return patched
 
 
+def _patch_output_processor(text: str) -> str:
+    patched = text
+    if "post_process_batch_result_prefill" not in patched:
+        patched = _replace_required(
+            patched,
+            (
+                "        self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)\n\n"
+                "        if self.current_scheduler_metrics_enabled:\n"
+            ),
+            (
+                "        self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)\n\n"
+                "        draft_worker_hook = getattr(\n"
+                "            getattr(self, \"draft_worker\", None),\n"
+                "            \"post_process_batch_result_prefill\",\n"
+                "            None,\n"
+                "        )\n"
+                "        if callable(draft_worker_hook):\n"
+                "            draft_worker_hook(batch, result)\n\n"
+                "        if self.current_scheduler_metrics_enabled:\n"
+            ),
+            "scheduler prefill output hook",
+        )
+    if "post_process_batch_result_decode" not in patched:
+        patched = _replace_required(
+            patched,
+            (
+                "        self.stream_output(batch.reqs, batch.return_logprob)\n"
+                "        self.token_to_kv_pool_allocator.free_group_end()\n\n"
+                "        self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)\n"
+            ),
+            (
+                "        self.stream_output(batch.reqs, batch.return_logprob)\n"
+                "        self.token_to_kv_pool_allocator.free_group_end()\n\n"
+                "        draft_worker_hook = getattr(\n"
+                "            getattr(self, \"draft_worker\", None),\n"
+                "            \"post_process_batch_result_decode\",\n"
+                "            None,\n"
+                "        )\n"
+                "        if callable(draft_worker_hook):\n"
+                "            draft_worker_hook(batch, result)\n\n"
+                "        self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)\n"
+            ),
+            "scheduler decode output hook",
+        )
+    return patched
+
+
 def _replace_required(text: str, old: str, new: str, label: str) -> str:
     if old not in text:
         if new in text:
@@ -208,3 +270,7 @@ def _spec_info_path(root: Path) -> Path:
 
 def _server_args_path(root: Path) -> Path:
     return root / "srt" / "server_args.py"
+
+
+def _output_processor_path(root: Path) -> Path:
+    return root / "srt" / "managers" / "scheduler_output_processor_mixin.py"

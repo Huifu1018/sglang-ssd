@@ -1,6 +1,9 @@
 import unittest
 
-from sglang_group.sglang.candidates import build_linear_candidate_rows
+from sglang_group.sglang.candidates import (
+    build_linear_candidate_rows,
+    build_tree_candidate_rows,
+)
 
 
 class CandidateRowTests(unittest.TestCase):
@@ -31,6 +34,19 @@ class CandidateRowTests(unittest.TestCase):
         self.assertEqual(rows.proposal_cache_events, ("hit",))
         self.assertEqual(rows.draft_cache_events, ("rebuild",))
         self.assertEqual(rows.proposal_methods, ("itl",))
+
+    def test_builds_tree_candidate_rows(self):
+        rows = build_tree_candidate_rows(
+            [5],
+            [[7, 8, 9]],
+            [[0, 1, 0]],
+            max_draft_token_num=4,
+        )
+
+        self.assertTrue(rows.is_tree)
+        self.assertEqual(rows.rows, ((5, 7, 8, 9),))
+        self.assertEqual(rows.parent_rows, ((-1, 0, 1, 0),))
+        self.assertEqual(rows.depth_rows, ((0, 1, 2, 1),))
 
 
 if __name__ == "__main__":

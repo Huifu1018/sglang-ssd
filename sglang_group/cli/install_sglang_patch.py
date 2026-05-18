@@ -17,7 +17,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Patch an installed SGLang 0.5.9 package or local source tree so "
-            "--speculative-algorithm SGLANG_GROUP is accepted natively."
+            "--speculative-algorithm SGLANG_GROUP is accepted natively and "
+            "scheduler output hooks can prefetch SSD proposals after request commits."
         )
     )
     parser.add_argument(

@@ -69,6 +69,46 @@ DRAFT_BACKEND_ALIASES = {
     "sglang-native": "sglang",
     "srt": "sglang",
 }
+SSD_MODES = {"off", "async-hit", "async-sync-fallback"}
+SSD_MODE_ALIASES = {
+    "0": "off",
+    "false": "off",
+    "none": "off",
+    "off": "off",
+    "hit": "async-hit",
+    "async-hit": "async-hit",
+    "async_hit": "async-hit",
+    "ready": "async-hit",
+    "ready-only": "async-hit",
+    "ready_only": "async-hit",
+    "async": "async-sync-fallback",
+    "async-fallback": "async-sync-fallback",
+    "async_fallback": "async-sync-fallback",
+    "async-sync-fallback": "async-sync-fallback",
+    "async_sync_fallback": "async-sync-fallback",
+}
+VERIFY_BACKENDS = {"auto", "sglang", "torch", "triton"}
+VERIFY_BACKEND_ALIASES = {
+    "auto": "auto",
+    "default": "auto",
+    "native": "auto",
+    "sglang": "sglang",
+    "upstream": "sglang",
+    "torch": "torch",
+    "pytorch": "torch",
+    "triton": "triton",
+    "cuda": "triton",
+}
+TOKENIZER_BRIDGES = {"uag", "segment"}
+TOKENIZER_BRIDGE_ALIASES = {
+    "uag": "uag",
+    "slem": "uag",
+    "lookbehind": "uag",
+    "retokenize": "uag",
+    "retokenise": "uag",
+    "segment": "segment",
+    "text": "segment",
+}
 
 
 def normalize_group_method(value: str, *, allow_auto: bool = False) -> str:
@@ -91,6 +131,36 @@ def normalize_draft_backend(value: str) -> str:
             "draft backend must be one of: " + ", ".join(sorted(DRAFT_BACKENDS)) + "."
         )
     return backend
+
+
+def normalize_ssd_mode(value: str) -> str:
+    mode = value.strip().lower().replace("_", "-")
+    mode = SSD_MODE_ALIASES.get(mode, mode)
+    if mode not in SSD_MODES:
+        raise ValueError(
+            "ssd mode must be one of: " + ", ".join(sorted(SSD_MODES)) + "."
+        )
+    return mode
+
+
+def normalize_verify_backend(value: str) -> str:
+    backend = value.strip().lower().replace("_", "-")
+    backend = VERIFY_BACKEND_ALIASES.get(backend, backend)
+    if backend not in VERIFY_BACKENDS:
+        raise ValueError(
+            "verify backend must be one of: " + ", ".join(sorted(VERIFY_BACKENDS)) + "."
+        )
+    return backend
+
+
+def normalize_tokenizer_bridge(value: str) -> str:
+    bridge = value.strip().lower().replace("_", "-")
+    bridge = TOKENIZER_BRIDGE_ALIASES.get(bridge, bridge)
+    if bridge not in TOKENIZER_BRIDGES:
+        raise ValueError(
+            "tokenizer bridge must be one of: " + ", ".join(sorted(TOKENIZER_BRIDGES)) + "."
+        )
+    return bridge
 
 
 @dataclass(frozen=True)
@@ -129,6 +199,14 @@ class GroupSGLangConfig:
     max_cached_proposals: int = 1024
     tli_min_intersection: int = 1
     metrics_log_interval: float | None = 60.0
+    ssd_mode: str = "off"
+    ssd_prefetch_workers: int = 1
+    ssd_max_prefetch: int = 256
+    cuda_overlap: bool = True
+    verify_backend: str = "auto"
+    tokenizer_bridge: str = "uag"
+    tree_branch_factor: int = 1
+    tree_max_depth: int | None = None
 
     @classmethod
     def from_env(cls, *, default_draft_device: str | None = None) -> "GroupSGLangConfig":
@@ -198,6 +276,24 @@ class GroupSGLangConfig:
             ),
             tli_min_intersection=_env_int("SGLANG_GROUP_TLI_MIN_INTERSECTION", 1) or 1,
             metrics_log_interval=_env_float("SGLANG_GROUP_METRICS_LOG_INTERVAL", 60.0),
+            ssd_mode=normalize_ssd_mode(
+                _env_value("SGLANG_GROUP_SSD_MODE", default="off") or "off"
+            ),
+            ssd_prefetch_workers=(
+                _env_int("SGLANG_GROUP_SSD_PREFETCH_WORKERS", 1) or 1
+            ),
+            ssd_max_prefetch=_env_int("SGLANG_GROUP_SSD_MAX_PREFETCH", 256) or 256,
+            cuda_overlap=_env_bool("SGLANG_GROUP_ENABLE_CUDA_OVERLAP", True),
+            verify_backend=normalize_verify_backend(
+                _env_value("SGLANG_GROUP_VERIFY_BACKEND", default="auto") or "auto"
+            ),
+            tokenizer_bridge=normalize_tokenizer_bridge(
+                _env_value("SGLANG_GROUP_TOKENIZER_BRIDGE", default="uag") or "uag"
+            ),
+            tree_branch_factor=(
+                _env_int("SGLANG_GROUP_TREE_BRANCH_FACTOR", 1) or 1
+            ),
+            tree_max_depth=_env_int("SGLANG_GROUP_TREE_MAX_DEPTH", None),
         )
 
     def method_for_batch(

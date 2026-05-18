@@ -1,0 +1,30 @@
+{
+  "engine": "sglang",
+  "sglang_version": "0.5.9",
+  "algorithm": "SGLANG_GROUP",
+  "target_model": "cyankiwi/MiniMax-M2.7-AWQ-4bit",
+  "draft_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "reason": "MiniMax-M2.7 and Qwen2.5 use heterogeneous tokenizers; SGLANG_GROUP retokenizes draft proposals into target-token verifier rows.",
+  "server_args": {
+    "host": "0.0.0.0",
+    "port": 30000,
+    "trust_remote_code": true,
+    "quantization": "read_from_hf_config",
+    "speculative_num_steps": 4,
+    "speculative_num_draft_tokens": 5
+  },
+  "environment": {
+    "SGLANG_GROUP_METHOD": "auto",
+    "SGLANG_GROUP_DRAFT_BACKEND": "sglang",
+    "SGLANG_GROUP_MAX_CONTEXT_TOKENS": "8192",
+    "SGLANG_GROUP_SSD_MODE": "async-hit",
+    "SGLANG_GROUP_SSD_PREFETCH_WORKERS": "1",
+    "SGLANG_GROUP_SSD_MAX_PREFETCH": "256",
+    "SGLANG_GROUP_ENABLE_CUDA_OVERLAP": "true",
+    "SGLANG_GROUP_VERIFY_BACKEND": "auto",
+    "SGLANG_GROUP_TOKENIZER_BRIDGE": "uag",
+    "SGLANG_GROUP_TREE_BRANCH_FACTOR": "4",
+    "SGLANG_GROUP_TREE_MAX_DEPTH": "3",
+    "SGLANG_GROUP_METRICS_LOG_INTERVAL": "5"
+  }
+}

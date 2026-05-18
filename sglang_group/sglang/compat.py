@@ -88,4 +88,52 @@ def patch_legacy_ngram_worker() -> bool:
 
     SpeculativeAlgorithm.create_worker = create_worker
     SpeculativeAlgorithm._sglang_group_legacy_patch = True
+    patch_scheduler_output_hooks()
     return True
+
+
+def patch_scheduler_output_hooks() -> bool:
+    """Patch scheduler output processing to notify draft workers after commits.
+
+    The hook runs after prefill/decode output ids have been committed to
+    requests. SGLANG_GROUP uses this to prefetch proposals for prefixes that are
+    only visible after scheduler-side output processing, especially target-only
+    fallbacks in async-hit mode.
+    """
+
+    try:
+        from sglang.srt.managers.scheduler_output_processor_mixin import (
+            SchedulerOutputProcessorMixin,
+        )
+    except Exception:
+        return False
+
+    if getattr(SchedulerOutputProcessorMixin, "_sglang_group_output_hook_patch", False):
+        return True
+
+    original_prefill = SchedulerOutputProcessorMixin.process_batch_result_prefill
+    original_decode = SchedulerOutputProcessorMixin.process_batch_result_decode
+
+    def process_batch_result_prefill(self, batch, result):
+        ret = original_prefill(self, batch, result)
+        _call_draft_worker_hook(self, "post_process_batch_result_prefill", batch, result)
+        return ret
+
+    def process_batch_result_decode(self, batch, result):
+        ret = original_decode(self, batch, result)
+        _call_draft_worker_hook(self, "post_process_batch_result_decode", batch, result)
+        return ret
+
+    SchedulerOutputProcessorMixin.process_batch_result_prefill = (
+        process_batch_result_prefill
+    )
+    SchedulerOutputProcessorMixin.process_batch_result_decode = process_batch_result_decode
+    SchedulerOutputProcessorMixin._sglang_group_output_hook_patch = True
+    return True
+
+
+def _call_draft_worker_hook(scheduler, hook_name: str, batch, result) -> None:
+    draft_worker = getattr(scheduler, "draft_worker", None)
+    hook = getattr(draft_worker, hook_name, None)
+    if callable(hook):
+        hook(batch, result)

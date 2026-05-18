@@ -14,7 +14,7 @@ def activate() -> None:
     wrapper uses the legacy NGRAM patch instead.
     """
 
-    from .compat import patch_legacy_ngram_worker
+    from .compat import patch_legacy_ngram_worker, patch_scheduler_output_hooks
 
     try:
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -22,6 +22,8 @@ def activate() -> None:
     except ModuleNotFoundError:
         patch_legacy_ngram_worker()
         return
+
+    patch_scheduler_output_hooks()
 
     if get_spec(SGLANG_GROUP_ALGORITHM) is not None:
         return

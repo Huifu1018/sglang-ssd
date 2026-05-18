@@ -41,6 +41,13 @@ GROUP_VALUE_FLAGS = {
     "--sglang-group-max-cached-proposals": "SGLANG_GROUP_MAX_CACHED_PROPOSALS",
     "--sglang-group-tli-min-intersection": "SGLANG_GROUP_TLI_MIN_INTERSECTION",
     "--sglang-group-metrics-log-interval": "SGLANG_GROUP_METRICS_LOG_INTERVAL",
+    "--sglang-group-ssd-mode": "SGLANG_GROUP_SSD_MODE",
+    "--sglang-group-ssd-prefetch-workers": "SGLANG_GROUP_SSD_PREFETCH_WORKERS",
+    "--sglang-group-ssd-max-prefetch": "SGLANG_GROUP_SSD_MAX_PREFETCH",
+    "--sglang-group-verify-backend": "SGLANG_GROUP_VERIFY_BACKEND",
+    "--sglang-group-tokenizer-bridge": "SGLANG_GROUP_TOKENIZER_BRIDGE",
+    "--sglang-group-tree-branch-factor": "SGLANG_GROUP_TREE_BRANCH_FACTOR",
+    "--sglang-group-tree-max-depth": "SGLANG_GROUP_TREE_MAX_DEPTH",
 }
 
 GROUP_BOOL_FLAGS = {
@@ -54,6 +61,7 @@ GROUP_BOOL_FLAGS = {
         "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE",
         "true",
     ),
+    "--no-sglang-group-cuda-overlap": ("SGLANG_GROUP_ENABLE_CUDA_OVERLAP", "false"),
 }
 
 
@@ -182,6 +190,46 @@ def main(argv: list[str] | None = None) -> None:
             "--no-sglang-group-proposal-cache",
             action="store_true",
             help="Disable deterministic ITL/SLEM proposal-result caching.",
+        )
+        parser.add_argument(
+            "--sglang-group-ssd-mode",
+            choices=["off", "async-hit", "async-sync-fallback"],
+            help=(
+                "SSD-style async proposal mode. async-hit uses only ready "
+                "background proposals; async-sync-fallback also fills misses "
+                "synchronously."
+            ),
+        )
+        parser.add_argument(
+            "--sglang-group-ssd-prefetch-workers",
+            help="Background proposal worker count. Default: 1.",
+        )
+        parser.add_argument(
+            "--sglang-group-ssd-max-prefetch",
+            help="Max completed async proposal entries. Default: 256.",
+        )
+        parser.add_argument(
+            "--sglang-group-verify-backend",
+            choices=["auto", "sglang", "torch", "triton"],
+            help="Verifier backend. auto uses the SGLANG_GROUP linear fast path.",
+        )
+        parser.add_argument(
+            "--sglang-group-tokenizer-bridge",
+            choices=["uag", "segment"],
+            help="How draft tokens are retokenized into target ids. Default: uag.",
+        )
+        parser.add_argument(
+            "--sglang-group-tree-branch-factor",
+            help="Root branch factor for tree candidates. Default: 1.",
+        )
+        parser.add_argument(
+            "--sglang-group-tree-max-depth",
+            help="Max verifier tree depth after the accepted root.",
+        )
+        parser.add_argument(
+            "--no-sglang-group-cuda-overlap",
+            action="store_true",
+            help="Disable draft proposal CUDA stream/event overlap.",
         )
         parser.add_argument("sglang_args", nargs=argparse.REMAINDER)
         parser.parse_args(argv)

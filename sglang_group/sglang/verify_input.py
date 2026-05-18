@@ -4,6 +4,39 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .verifier import tree_greedy_verify
+
+
+class GroupGreedyVerifyInputMixin:
+    """Use SGLANG_GROUP's linear/tree verifier for greedy target verification."""
+
+    def __init__(self, *args, verify_backend: str = "auto", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sglang_group_verify_backend = verify_backend
+        self.sglang_group_verify_backend_used = None
+
+    def _greedy_verify(self, batch, logits_output):
+        backend = getattr(self, "sglang_group_verify_backend", "auto")
+        if backend == "sglang":
+            self.sglang_group_verify_backend_used = "sglang"
+            return super()._greedy_verify(batch, logits_output)
+
+        result = tree_greedy_verify(
+            next_token_logits=logits_output.next_token_logits,
+            draft_token=self.draft_token,
+            draft_token_num=self.draft_token_num,
+            retrieve_index=_spec_attr(self, "retrieve_index", "retrive_index"),
+            retrieve_next_token=_spec_attr(self, "retrieve_next_token", "retrive_next_token"),
+            retrieve_next_sibling=_spec_attr(self, "retrieve_next_sibling", "retrive_next_sibling"),
+            backend=backend,
+        )
+        self.predict = result.predict
+        self.accepted_indices = result.accepted_indices
+        self.accept_length = result.accept_length
+        self.accept_indices = result.accepted_indices
+        self.num_correct_drafts = result.accept_length
+        self.sglang_group_verify_backend_used = result.backend
+
 
 class TliVerifyInputMixin:
     """Mixin overriding SGLang's sampling verifier with real TLI draft probs."""
@@ -107,7 +140,7 @@ def _spec_attr(obj: object, modern_name: str, legacy_name: str):
     return getattr(obj, legacy_name)
 
 
-def make_tli_verify_input(
+def make_group_verify_input(
     *,
     draft_token,
     tree_mask,
@@ -116,17 +149,29 @@ def make_tli_verify_input(
     retrieve_next_token,
     retrieve_next_sibling,
     draft_token_num: int,
-    draft_probs,
+    draft_probs=None,
+    verify_backend: str = "auto",
     grammar: Optional[object] = None,
 ):
-    """Create a TLI-capable NgramVerifyInput for the installed SGLang build."""
+    """Create a SGLANG_GROUP verify input for the installed SGLang build."""
 
     from sglang.srt.speculative.ngram_info import NgramVerifyInput
 
-    class TliVerifyInput(TliVerifyInputMixin, NgramVerifyInput):
-        pass
+    if draft_probs is None:
+        class GroupVerifyInput(GroupGreedyVerifyInputMixin, NgramVerifyInput):
+            pass
 
-    return TliVerifyInput(
+        verify_cls = GroupVerifyInput
+    else:
+        class GroupVerifyInput(TliVerifyInputMixin, GroupGreedyVerifyInputMixin, NgramVerifyInput):
+            pass
+
+        verify_cls = GroupVerifyInput
+
+    kwargs = {"grammar": grammar, "verify_backend": verify_backend}
+    if draft_probs is not None:
+        kwargs["draft_probs"] = draft_probs
+    return verify_cls(
         draft_token,
         tree_mask,
         positions,
@@ -134,6 +179,11 @@ def make_tli_verify_input(
         retrieve_next_token,
         retrieve_next_sibling,
         draft_token_num,
-        grammar=grammar,
-        draft_probs=draft_probs,
+        **kwargs,
     )
+
+
+def make_tli_verify_input(**kwargs):
+    """Backward-compatible helper for tests/importers."""
+
+    return make_group_verify_input(**kwargs)
