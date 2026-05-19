@@ -43,43 +43,114 @@ logger = logging.getLogger(__name__)
 
 
 class _NativeForwardGate:
-    """Serialize native draft/target forwards while giving target decode priority."""
+    """Serialize native draft/target forwards and order their CUDA work.
+
+    SGLang/FlashInfer kernels can outlive the Python forward call that enqueued
+    them. The gate therefore records a CUDA event when a forward returns and
+    makes the next forward stream wait on it before launching more kernels.
+    """
 
     def __init__(self) -> None:
         self._condition = Condition(Lock())
         self._active = False
         self._target_waiters = 0
+        self._last_cuda_event = None
+        self._torch = None
 
     @contextmanager
     def target_context(self):
+        previous_event = self._enter_target()
+        self._wait_for_event(previous_event)
+        try:
+            yield
+        finally:
+            self._exit(self._record_event())
+
+    @contextmanager
+    def draft_context(self):
+        previous_event = self._enter_draft()
+        self._wait_for_event(previous_event)
+        try:
+            yield
+        finally:
+            self._exit(self._record_event())
+
+    def _enter_target(self):
         with self._condition:
             self._target_waiters += 1
             try:
                 while self._active:
                     self._condition.wait()
                 self._active = True
+                return self._last_cuda_event
             finally:
                 self._target_waiters -= 1
                 self._condition.notify_all()
-        try:
-            yield
-        finally:
-            with self._condition:
-                self._active = False
-                self._condition.notify_all()
 
-    @contextmanager
-    def draft_context(self):
+    def _enter_draft(self):
         with self._condition:
             while self._active or self._target_waiters > 0:
                 self._condition.wait()
             self._active = True
+            return self._last_cuda_event
+
+    def _exit(self, event) -> None:
+        with self._condition:
+            if event is not None:
+                self._last_cuda_event = event
+            self._active = False
+            self._condition.notify_all()
+
+    def _wait_for_event(self, event) -> None:
+        if event is None:
+            return
+        torch = self._load_torch()
+        if torch is None:
+            return
         try:
-            yield
-        finally:
-            with self._condition:
-                self._active = False
-                self._condition.notify_all()
+            torch.cuda.current_stream().wait_event(event)
+        except Exception:
+            logger.debug(
+                "SGLANG_GROUP native forward CUDA event wait failed; "
+                "falling back to CPU synchronization.",
+                exc_info=True,
+            )
+            try:
+                event.synchronize()
+            except Exception:
+                logger.exception("SGLANG_GROUP native forward CUDA event sync failed.")
+
+    def _record_event(self):
+        torch = self._load_torch()
+        if torch is None:
+            return None
+        try:
+            event = torch.cuda.Event(enable_timing=False)
+            event.record(torch.cuda.current_stream())
+            return event
+        except Exception:
+            logger.debug(
+                "SGLANG_GROUP native forward CUDA event record failed; "
+                "falling back to device synchronization.",
+                exc_info=True,
+            )
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                logger.exception("SGLANG_GROUP native forward CUDA sync failed.")
+            return None
+
+    def _load_torch(self):
+        if self._torch is not None:
+            return self._torch
+        try:
+            import torch
+        except Exception:
+            return None
+        if not getattr(torch, "cuda", None) or not torch.cuda.is_available():
+            return None
+        self._torch = torch
+        return torch
 
 
 @dataclass

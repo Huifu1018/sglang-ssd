@@ -185,7 +185,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 | `--sglang-group-tokenizer-bridge` | `uag` | UAG/lookbehind retokenization 或 segment-only retokenization。 |
 | `--sglang-group-tree-branch-factor` | `1` | root top-k branch factor；branch/tree 测试建议设为 `4`。 |
 | `--sglang-group-tree-max-depth` | 未设置 | verifier tree 最大深度上限。 |
-| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。当前 `draft_backend=sglang` 会自动关闭 stream/event overlap，并用 target 优先的进程内 forward gate 保护 target/draft 的 SGLang runtime parallel state，避免 scheduler watchdog 卡死和后台 draft 抢占 target decode。 |
+| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。当前 `draft_backend=sglang` 会自动关闭 stream/event overlap，并用 target 优先的进程内 forward gate + CUDA event 排序保护 target/draft 的 SGLang runtime parallel state，避免 scheduler watchdog 卡死、FlashInfer kernel overlap 和后台 draft 抢占 target decode。 |
 | `--sglang-group-max-context-tokens` | 未设置 | 限制 draft 侧上下文长度。 |
 | `--sglang-group-metrics-log-interval` | `60` | 周期性 metrics log 间隔，设为 `0` 可关闭。 |
 
