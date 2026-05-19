@@ -123,6 +123,29 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 
 注意：如果使用 `--tp-size > 1` 且 draft backend 是 `sglang`，后台 draft 线程会涉及 tensor-parallel collective。当前实现会为 draft ModelRunner 创建独立 TP group/communicator，避免 draft collective 和 target collective 共用同一个 TP communicator 后乱序卡死。独立 draft TP group 创建失败时会启动失败，不会自动降级到 `async-sync-fallback`。
 
+多卡 TP 场景示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 sglang-group-launch \
+  --model-path cyankiwi/MiniMax-M2.7-AWQ-4bit \
+  --tp-size 4 \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --trust-remote-code \
+  --speculative-algorithm SGLANG_GROUP \
+  --speculative-draft-model-path Qwen/Qwen2.5-1.5B-Instruct \
+  --speculative-num-steps 4 \
+  --speculative-num-draft-tokens 5 \
+  --sglang-group-method auto \
+  --sglang-group-draft-backend sglang \
+  --sglang-group-ssd-mode async-hit \
+  --sglang-group-verify-backend auto \
+  --sglang-group-tokenizer-bridge uag \
+  --sglang-group-tree-branch-factor 4 \
+  --sglang-group-tree-max-depth 3 \
+  --sglang-group-metrics-log-interval 5
+```
+
 ## 基线对比
 
 建议同时启动一个 target-only SGLang server 作为基线：
@@ -221,6 +244,6 @@ PYTHONPATH=. python -m unittest discover -s tests -p "test_*.py"
 当前本地验证结果：
 
 ```text
-Ran 52 tests
-OK (skipped=5)
+Ran 54 tests
+OK (skipped=6)
 ```
