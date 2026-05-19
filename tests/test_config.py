@@ -5,6 +5,7 @@ from sglang_group.sglang.config import (
     GroupSGLangConfig,
     normalize_draft_backend,
     normalize_group_method,
+    normalize_native_draft_tp_mode,
     normalize_ssd_mode,
     normalize_tokenizer_bridge,
     normalize_verify_backend,
@@ -36,6 +37,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(normalize_draft_backend("hf"), "transformers")
         self.assertEqual(normalize_draft_backend("sglang-native"), "sglang")
 
+    def test_native_draft_tp_mode_aliases(self):
+        self.assertEqual(normalize_native_draft_tp_mode("single_gpu"), "replica")
+        self.assertEqual(normalize_native_draft_tp_mode("independent-tp"), "independent")
+
     def test_ssd_mode_aliases(self):
         self.assertEqual(normalize_ssd_mode("off"), "off")
         self.assertEqual(normalize_ssd_mode("ready_only"), "async-hit")
@@ -56,6 +61,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.enable_proposal_cache)
         self.assertEqual(config.max_cached_proposals, 1024)
         self.assertTrue(config.cuda_overlap)
+        self.assertEqual(config.native_draft_tp_mode, "auto")
         self.assertEqual(config.verify_backend, "auto")
         self.assertEqual(config.tokenizer_bridge, "uag")
         self.assertEqual(config.tree_branch_factor, 1)
@@ -73,6 +79,7 @@ class ConfigTests(unittest.TestCase):
                 "SGLANG_GROUP_DRAFT_BACKEND": "sglang",
                 "SGLANG_GROUP_NATIVE_DRAFT_CACHE_TOKENS": "4096",
                 "SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS": "2",
+                "SGLANG_GROUP_NATIVE_DRAFT_TP_MODE": "single_gpu",
                 "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE": "1",
                 "SGLANG_GROUP_ENABLE_PROPOSAL_CACHE": "0",
                 "SGLANG_GROUP_MAX_CACHED_PROPOSALS": "12",
@@ -91,6 +98,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.draft_backend, "sglang")
             self.assertEqual(config.native_draft_cache_tokens, 4096)
             self.assertEqual(config.native_draft_max_requests, 2)
+            self.assertEqual(config.native_draft_tp_mode, "replica")
             self.assertTrue(config.native_draft_kv_cache)
             self.assertFalse(config.enable_proposal_cache)
             self.assertEqual(config.max_cached_proposals, 12)

@@ -69,6 +69,20 @@ DRAFT_BACKEND_ALIASES = {
     "sglang-native": "sglang",
     "srt": "sglang",
 }
+DRAFT_TP_MODES = {"auto", "replica", "independent"}
+DRAFT_TP_MODE_ALIASES = {
+    "auto": "auto",
+    "replica": "replica",
+    "replicated": "replica",
+    "single": "replica",
+    "single-gpu": "replica",
+    "single_gpu": "replica",
+    "local": "replica",
+    "independent": "independent",
+    "independent-tp": "independent",
+    "independent_tp": "independent",
+    "tp": "independent",
+}
 SSD_MODES = {"off", "async-hit", "async-sync-fallback"}
 SSD_MODE_ALIASES = {
     "0": "off",
@@ -133,6 +147,18 @@ def normalize_draft_backend(value: str) -> str:
     return backend
 
 
+def normalize_native_draft_tp_mode(value: str) -> str:
+    mode = value.strip().lower().replace("_", "-")
+    mode = DRAFT_TP_MODE_ALIASES.get(mode, mode)
+    if mode not in DRAFT_TP_MODES:
+        raise ValueError(
+            "native draft tp mode must be one of: "
+            + ", ".join(sorted(DRAFT_TP_MODES))
+            + "."
+        )
+    return mode
+
+
 def normalize_ssd_mode(value: str) -> str:
     mode = value.strip().lower().replace("_", "-")
     mode = SSD_MODE_ALIASES.get(mode, mode)
@@ -185,6 +211,7 @@ class GroupSGLangConfig:
     native_draft_cache_tokens: int | None = None
     native_draft_max_requests: int = 1
     native_draft_kv_cache: bool = False
+    native_draft_tp_mode: str = "auto"
     dtw_window: int | None = 8
     max_draft_tokens: int | None = None
     max_context_tokens: int | None = None
@@ -259,6 +286,10 @@ class GroupSGLangConfig:
             ),
             native_draft_kv_cache=_env_bool(
                 "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE", False
+            ),
+            native_draft_tp_mode=normalize_native_draft_tp_mode(
+                _env_value("SGLANG_GROUP_NATIVE_DRAFT_TP_MODE", default="auto")
+                or "auto"
             ),
             dtw_window=_env_int("SGLANG_GROUP_DTW_WINDOW", 8),
             max_draft_tokens=_env_int("SGLANG_GROUP_MAX_DRAFT_TOKENS", None),

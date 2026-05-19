@@ -18,10 +18,43 @@ class NativeDraftSessionTests(unittest.TestCase):
     def test_single_tp_does_not_create_independent_draft_group(self):
         backend = object.__new__(SGLangNativeDraftBackend)
         backend.server_args = SimpleNamespace(tp_size=1)
+        backend.target_tp_size = 1
+        backend.draft_tp_mode = "independent"
         backend.draft_tp_group = None
 
         self.assertIsNone(backend._create_independent_tp_group())
         self.assertFalse(backend.has_independent_tp_group)
+
+    def test_async_hit_auto_tp_mode_uses_replica(self):
+        backend = object.__new__(SGLangNativeDraftBackend)
+        backend.target_tp_size = 4
+        backend.config = SimpleNamespace(
+            native_draft_tp_mode="auto",
+            ssd_mode="async-hit",
+        )
+
+        self.assertEqual(backend._resolve_draft_tp_mode(), "replica")
+
+    def test_sync_fallback_auto_tp_mode_uses_independent_group(self):
+        backend = object.__new__(SGLangNativeDraftBackend)
+        backend.target_tp_size = 4
+        backend.config = SimpleNamespace(
+            native_draft_tp_mode="auto",
+            ssd_mode="async-sync-fallback",
+        )
+
+        self.assertEqual(backend._resolve_draft_tp_mode(), "independent")
+
+    def test_replica_tp_group_path_uses_single_tp_server_args(self):
+        backend = object.__new__(SGLangNativeDraftBackend)
+        backend.server_args = SimpleNamespace(tp_size=1)
+        backend.target_tp_size = 4
+        backend.draft_tp_mode = "replica"
+        backend._create_replicated_tp_group = lambda: "replica-group"
+
+        backend.draft_tp_group = backend._create_draft_tp_group()
+        self.assertEqual(backend.draft_tp_group, "replica-group")
+        self.assertTrue(backend.uses_replicated_tp)
 
     def test_speculative_rollback_restores_batch_req_and_allocator(self):
         class FakeAllocator:

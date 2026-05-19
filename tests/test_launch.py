@@ -42,6 +42,7 @@ class LaunchTests(unittest.TestCase):
             "--sglang-group-native-draft-cache-tokens",
             "8192",
             "--sglang-group-native-draft-max-requests=2",
+            "--sglang-group-native-draft-tp-mode=replica",
             "--sglang-group-max-cached-proposals",
             "16",
             "--sglang-group-metrics-log-interval=5",
@@ -71,6 +72,7 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_QUANTIZATION"], "awq")
         self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_CACHE_TOKENS"], "8192")
         self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS"], "2")
+        self.assertEqual(environ["SGLANG_GROUP_NATIVE_DRAFT_TP_MODE"], "replica")
         self.assertEqual(environ["SGLANG_GROUP_MAX_CACHED_PROPOSALS"], "16")
         self.assertEqual(environ["SGLANG_GROUP_METRICS_LOG_INTERVAL"], "5")
         self.assertEqual(environ["SGLANG_GROUP_SSD_MODE"], "async-sync-fallback")

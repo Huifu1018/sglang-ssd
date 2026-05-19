@@ -273,27 +273,28 @@ class SGLangGroupWorker:
         server_args: ServerArgs,
         native_backend: object | None,
     ) -> None:
-        needs_independent_group = (
+        needs_replicated_draft = (
             self.config.ssd_mode == "async-hit"
             and self.config.draft_backend == "sglang"
             and int(getattr(server_args, "tp_size", 1) or 1) > 1
         )
-        if not needs_independent_group:
+        if not needs_replicated_draft:
             return
         if native_backend is not None and bool(
-            getattr(native_backend, "has_independent_tp_group", False)
+            getattr(native_backend, "uses_replicated_tp", False)
         ):
             logger.info(
-                "SGLANG_GROUP async-hit is using an independent draft TP group "
-                "for tp_size=%s.",
+                "SGLANG_GROUP async-hit is using replicated single-GPU draft "
+                "runners for target tp_size=%s to avoid concurrent TP/NCCL "
+                "collectives.",
                 getattr(server_args, "tp_size", 1),
             )
             return
         raise RuntimeError(
             "SGLANG_GROUP async-hit with draft_backend=sglang and tp_size > 1 "
-            "requires an independent draft TP group. The group could not be "
-            "created, so refusing to start instead of falling back or risking "
-            "NCCL collective deadlock."
+            "requires replicated single-GPU draft runners. The replicated "
+            "draft TP group could not be created, so refusing to start instead "
+            "of falling back or risking NCCL collective deadlock."
         )
 
     def post_process_batch_result_prefill(self, batch: ScheduleBatch, result) -> None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Sequence
@@ -223,8 +223,14 @@ class SGLangNativeDraftBackend:
         if config.draft_dtype != "auto":
             self.server_args.dtype = _sglang_dtype_name(config.draft_dtype)
 
+        self.target_tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+        self.draft_tp_mode = self._resolve_draft_tp_mode()
+        if self.draft_tp_mode == "replica":
+            self.server_args.tp_size = 1
+
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank
+        self.draft_tp_rank = 0 if self.draft_tp_mode == "replica" else tp_rank
         self.dp_rank = dp_rank
         self.moe_ep_rank = moe_ep_rank
         self.attn_cp_rank = attn_cp_rank
@@ -235,7 +241,15 @@ class SGLangNativeDraftBackend:
             server_args.speculative_draft_model_path,
             trust_remote_code=trust_remote_code,
         )
-        self.draft_tp_group = self._create_independent_tp_group()
+        self.draft_tp_group = self._create_draft_tp_group()
+        if (
+            self.draft_tp_mode == "replica"
+            and self.target_tp_size > 1
+            and self.draft_tp_group is None
+        ):
+            raise RuntimeError(
+                "SGLANG_GROUP replicated draft TP group could not be created."
+            )
         self.model_runner = self._load_model_runner()
         self.device = self.model_runner.device
         self._cached_session: SGLangNativeDraftSession | None = None
@@ -245,16 +259,30 @@ class SGLangNativeDraftBackend:
 
         logger.info(
             "Initialized SGLang-native draft backend: draft=%s, device=%s, "
-            "tp_rank=%s, cache_tokens=%s, max_requests=%s, kv_cache=%s, "
-            "independent_tp_group=%s",
+            "target_tp_size=%s, draft_tp_mode=%s, draft_tp_size=%s, "
+            "draft_tp_rank=%s, cache_tokens=%s, max_requests=%s, kv_cache=%s, "
+            "draft_tp_group_world_size=%s",
             server_args.speculative_draft_model_path,
             self.device,
-            tp_rank,
+            self.target_tp_size,
+            self.draft_tp_mode,
+            getattr(self.server_args, "tp_size", None),
+            self.draft_tp_rank,
             getattr(self.server_args, "draft_runner_cache_size", None),
             getattr(self.server_args, "max_num_reqs", None),
             bool(config.native_draft_kv_cache),
-            bool(self.has_independent_tp_group),
+            getattr(self.draft_tp_group, "world_size", None),
         )
+
+    def _resolve_draft_tp_mode(self) -> str:
+        requested = getattr(self.config, "native_draft_tp_mode", "auto")
+        if requested != "auto":
+            return requested
+        if self.target_tp_size <= 1:
+            return "independent"
+        if self.config.ssd_mode == "async-hit":
+            return "replica"
+        return "independent"
 
     def _configure_scratch_cache_size(self, source_server_args: object) -> None:
         page_size = int(getattr(self.server_args, "page_size", 1) or 1)
@@ -318,7 +346,7 @@ class SGLangNativeDraftBackend:
                 model_config=model_config,
                 mem_fraction_static=self.server_args.mem_fraction_static,
                 gpu_id=self.gpu_id,
-                tp_rank=self.tp_rank,
+                tp_rank=self.draft_tp_rank,
                 tp_size=self.server_args.tp_size,
                 moe_ep_rank=self.moe_ep_rank,
                 moe_ep_size=self.server_args.ep_size,
@@ -336,7 +364,60 @@ class SGLangNativeDraftBackend:
 
     @property
     def has_independent_tp_group(self) -> bool:
-        return self.draft_tp_group is not None
+        return self.draft_tp_mode == "independent" and self.draft_tp_group is not None
+
+    @property
+    def uses_replicated_tp(self) -> bool:
+        return self.draft_tp_mode == "replica" and (
+            self.target_tp_size <= 1 or self.draft_tp_group is not None
+        )
+
+    def _create_draft_tp_group(self):
+        if int(getattr(self.server_args, "tp_size", 1) or 1) <= 1:
+            if self.target_tp_size > 1:
+                return self._create_replicated_tp_group()
+            return None
+        return self._create_independent_tp_group()
+
+    def _create_replicated_tp_group(self):
+        try:
+            import torch.distributed as dist
+            from sglang.srt.distributed import get_tp_group
+            from sglang.srt.distributed.parallel_state import (
+                get_world_group,
+                init_model_parallel_group,
+            )
+
+            if not dist.is_available() or not dist.is_initialized():
+                return None
+
+            target_tp_group = get_tp_group()
+            world_group = get_world_group()
+            backend = dist.get_backend(world_group.device_group)
+            singleton_groups = [[int(rank)] for rank in target_tp_group.ranks]
+            draft_tp_group = init_model_parallel_group(
+                singleton_groups,
+                target_tp_group.local_rank,
+                backend,
+                use_pynccl=True,
+                use_custom_allreduce=False,
+                use_message_queue_broadcaster=False,
+                use_mscclpp_allreduce=False,
+                use_torch_symm_mem_allreduce=False,
+                group_name="sglang_group_draft_replica_tp",
+                pynccl_use_current_stream=True,
+            )
+            barrier = getattr(draft_tp_group, "barrier", None)
+            if callable(barrier):
+                barrier()
+            logger.info(
+                "Created replicated SGLANG_GROUP draft TP group: ranks=%s",
+                getattr(draft_tp_group, "ranks", None),
+            )
+            return draft_tp_group
+        except Exception:
+            logger.exception("Failed to create replicated SGLANG_GROUP draft TP group.")
+            return None
 
     def _create_independent_tp_group(self):
         if int(getattr(self.server_args, "tp_size", 1) or 1) <= 1:
@@ -383,13 +464,7 @@ class SGLangNativeDraftBackend:
     def _draft_tp_init_context(self):
         if self.draft_tp_group is None:
             return nullcontext()
-        try:
-            from sglang.srt.distributed.parallel_state import patch_tensor_parallel_group
-
-            return patch_tensor_parallel_group(self.draft_tp_group)
-        except Exception:
-            logger.exception("Failed to enter SGLANG_GROUP draft TP init context.")
-            return nullcontext()
+        return _patch_draft_parallel_groups(self.draft_tp_group)
 
     def clear(self) -> None:
         self._drop_cached_session()
@@ -573,6 +648,38 @@ class SGLangNativeDraftBackend:
             disable_overlap_schedule=self.model_runner.server_args.disable_overlap_schedule,
             offload_tags=set(),
         )
+
+
+@contextmanager
+def _patch_draft_parallel_groups(tp_group):
+    """Patch SGLang TP globals while constructing a draft ModelRunner.
+
+    SGLang 0.5.9 only exposes a public patch helper for `_TP`. The draft
+    ModelRunner also snapshots `_ATTN_TP` during construction, so patch both
+    here and restore immediately after loading.
+    """
+
+    try:
+        import sglang.srt.distributed.parallel_state as parallel_state
+    except Exception:
+        logger.exception("Failed to import SGLang parallel state for draft TP patch.")
+        yield
+        return
+
+    if getattr(parallel_state, "_TP_STATE_PATCHED", False):
+        raise RuntimeError("SGLang tensor parallel state is already patched.")
+
+    old_tp = getattr(parallel_state, "_TP", None)
+    old_attn_tp = getattr(parallel_state, "_ATTN_TP", None)
+    parallel_state._TP_STATE_PATCHED = True
+    parallel_state._TP = tp_group
+    parallel_state._ATTN_TP = tp_group
+    try:
+        yield
+    finally:
+        parallel_state._ATTN_TP = old_attn_tp
+        parallel_state._TP = old_tp
+        parallel_state._TP_STATE_PATCHED = False
 
 
 def _sglang_dtype_name(dtype_name: str) -> str:

@@ -32,6 +32,7 @@ GROUP_VALUE_FLAGS = {
     "--sglang-group-native-draft-quantization": "SGLANG_GROUP_NATIVE_DRAFT_QUANTIZATION",
     "--sglang-group-native-draft-cache-tokens": "SGLANG_GROUP_NATIVE_DRAFT_CACHE_TOKENS",
     "--sglang-group-native-draft-max-requests": "SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS",
+    "--sglang-group-native-draft-tp-mode": "SGLANG_GROUP_NATIVE_DRAFT_TP_MODE",
     "--sglang-group-max-draft-tokens": "SGLANG_GROUP_MAX_DRAFT_TOKENS",
     "--sglang-group-max-context-tokens": "SGLANG_GROUP_MAX_CONTEXT_TOKENS",
     "--sglang-group-assistant-lookbehind": "SGLANG_GROUP_ASSISTANT_LOOKBEHIND",
@@ -173,6 +174,15 @@ def main(argv: list[str] | None = None) -> None:
         parser.add_argument(
             "--sglang-group-native-draft-max-requests",
             help="Draft request pool size for backend=sglang. Default: 1.",
+        )
+        parser.add_argument(
+            "--sglang-group-native-draft-tp-mode",
+            choices=["auto", "replica", "independent"],
+            help=(
+                "TP mode for backend=sglang draft. auto uses per-GPU replica "
+                "for async-hit with target tp_size>1; independent uses a "
+                "separate TP group. Default: auto."
+            ),
         )
         parser.add_argument(
             "--sglang-group-enable-native-draft-kv-cache",

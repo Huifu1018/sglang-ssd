@@ -121,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 
 在 `async-hit` 下，proposal cache hit 的请求会走 speculative verify，miss 的请求会走安全的 root-only verify fallback。
 
-注意：如果使用 `--tp-size > 1` 且 draft backend 是 `sglang`，后台 draft 线程会涉及 tensor-parallel collective。当前实现会为 draft ModelRunner 创建独立 TP group/communicator，避免 draft collective 和 target collective 共用同一个 TP communicator 后乱序卡死。独立 draft TP group 创建失败时会启动失败，不会自动降级到 `async-sync-fallback`。
+注意：如果使用 `--tp-size > 1`、`--sglang-group-draft-backend sglang` 和 `async-hit`，后台 draft 不能再走 TP collective；否则 target decode 和 draft proposal 在同一组 rank 上并发发起 NCCL collective 时，可能因为跨 rank 顺序不一致而卡死。当前默认 `--sglang-group-native-draft-tp-mode auto` 会在这种场景下为每张 GPU 加载一个 draft 单卡副本，避免后台 draft 参与 TP/NCCL collective。这个模式会增加 draft 显存占用，但不会自动降级到 `async-sync-fallback`。
 
 多卡 TP 场景示例：
 
@@ -138,6 +138,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 sglang-group-launch \
   --speculative-num-draft-tokens 5 \
   --sglang-group-method auto \
   --sglang-group-draft-backend sglang \
+  --sglang-group-native-draft-tp-mode auto \
   --sglang-group-ssd-mode async-hit \
   --sglang-group-verify-backend auto \
   --sglang-group-tokenizer-bridge uag \
@@ -173,6 +174,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 | --- | --- | --- |
 | `--sglang-group-method` | `auto` | `itl`、`itl-base-slem`、`itl-base-tli` 或按 temperature 自动路由。 |
 | `--sglang-group-draft-backend` | `sglang` | draft 模型通过 SGLang 低层 `ModelRunner` 执行。 |
+| `--sglang-group-native-draft-tp-mode` | `auto` | `auto`、`replica` 或 `independent`。`async-hit + tp_size>1` 下 `auto` 会选 `replica`，每张 GPU 一个 draft 副本，避免并发 TP/NCCL 卡死。 |
 | `--sglang-group-ssd-mode` | `off` | `off`、`async-hit` 或 `async-sync-fallback`。 |
 | `--sglang-group-ssd-prefetch-workers` | `1` | 后台 proposal worker 数量。 |
 | `--sglang-group-ssd-max-prefetch` | `256` | 异步 proposal 完成缓存大小。 |
@@ -255,6 +257,6 @@ PYTHONPATH=. python -m unittest discover -s tests -p "test_*.py"
 当前本地验证结果：
 
 ```text
-Ran 56 tests
+Ran 60 tests
 OK (skipped=6)
 ```
