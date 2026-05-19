@@ -9,6 +9,7 @@ from sglang_group.sglang.proposer import (
     HeterogeneousDraftProposer,
     SamplingRequest,
     _clone_cache,
+    _tli_sampling_seed,
 )
 
 
@@ -310,6 +311,89 @@ class ProposalResultCacheTests(unittest.TestCase):
         self.assertEqual(tokens, (2, 2, 3, 4))
         self.assertEqual(parents, (0, 1, 0, 0))
         self.assertEqual(proposer.stats.tree_proposals, 1)
+
+
+class TliSamplingTests(unittest.TestCase):
+    def _new_tli_proposer(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        proposer = object.__new__(HeterogeneousDraftProposer)
+        proposer._valid_assistant_ids = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+        proposer._valid_target_ids = torch.tensor([10, 11, 12, 13], dtype=torch.long)
+        proposer.target_vocab_size = 16
+        return proposer
+
+    def test_tli_sampling_seed_is_rank_stable_and_prefix_sensitive(self):
+        sampling = SamplingRequest(temperature=0.8, top_k=40, top_p=0.95)
+
+        seed = _tli_sampling_seed(
+            rid="rid-1",
+            context_ids=(1, 2, 3),
+            max_draft_tokens=4,
+            sampling=sampling,
+        )
+
+        self.assertEqual(
+            seed,
+            _tli_sampling_seed(
+                rid="rid-1",
+                context_ids=(1, 2, 3),
+                max_draft_tokens=4,
+                sampling=sampling,
+            ),
+        )
+        self.assertNotEqual(
+            seed,
+            _tli_sampling_seed(
+                rid="rid-1",
+                context_ids=(1, 2, 4),
+                max_draft_tokens=4,
+                sampling=sampling,
+            ),
+        )
+
+    def test_tli_multinomial_is_reproducible_from_request_generator(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        proposer = self._new_tli_proposer()
+        logits = torch.tensor([[0.2, 1.0, 0.7, -0.4]], dtype=torch.float32)
+        sampling = SamplingRequest(temperature=0.9, top_k=-1, top_p=1.0)
+
+        generator_a = proposer._tli_sampling_generator(
+            rid="rid-1",
+            context_ids=(1, 2, 3),
+            max_draft_tokens=3,
+            sampling=sampling,
+            device=logits.device,
+        )
+        generator_b = proposer._tli_sampling_generator(
+            rid="rid-1",
+            context_ids=(1, 2, 3),
+            max_draft_tokens=3,
+            sampling=sampling,
+            device=logits.device,
+        )
+
+        probs_a, assistant_a, target_a = proposer._sample_tli_token(
+            logits,
+            sampling=sampling,
+            generator=generator_a,
+        )
+        probs_b, assistant_b, target_b = proposer._sample_tli_token(
+            logits,
+            sampling=sampling,
+            generator=generator_b,
+        )
+
+        self.assertTrue(torch.equal(probs_a, probs_b))
+        self.assertEqual(assistant_a, assistant_b)
+        self.assertEqual(target_a, target_b)
 
 
 if __name__ == "__main__":

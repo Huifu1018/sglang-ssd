@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 from .verifier import tree_greedy_verify
@@ -109,8 +110,23 @@ class TliVerifyInputMixin:
                     f"{tuple(draft_probs.shape)} != {tuple(target_probs.shape)}"
                 )
 
-        coins = torch.rand_like(candidates, dtype=torch.float32, device=self.device)
-        coins_for_final_sampling = torch.rand((bs,), dtype=torch.float32, device=self.device)
+        generator = _rank_stable_verify_generator(
+            batch=batch,
+            draft_token_num=self.draft_token_num,
+            device=self.device,
+        )
+        coins = torch.rand(
+            candidates.shape,
+            dtype=torch.float32,
+            device=self.device,
+            generator=generator,
+        )
+        coins_for_final_sampling = torch.rand(
+            (bs,),
+            dtype=torch.float32,
+            device=self.device,
+            generator=generator,
+        )
 
         retrieve_index = _spec_attr(self, "retrieve_index", "retrive_index")
         retrieve_next_token = _spec_attr(self, "retrieve_next_token", "retrive_next_token")
@@ -138,6 +154,41 @@ def _spec_attr(obj: object, modern_name: str, legacy_name: str):
     if hasattr(obj, modern_name):
         return getattr(obj, modern_name)
     return getattr(obj, legacy_name)
+
+
+def _rank_stable_verify_generator(*, batch, draft_token_num: int, device):
+    import torch
+
+    seed = _rank_stable_verify_seed(batch=batch, draft_token_num=draft_token_num)
+    try:
+        generator = torch.Generator(device=device)
+    except TypeError:
+        generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
+def _rank_stable_verify_seed(*, batch, draft_token_num: int) -> int:
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(int(draft_token_num).to_bytes(8, "little", signed=True))
+    for req in getattr(batch, "reqs", []) or []:
+        rid = str(getattr(req, "rid", ""))
+        digest.update(rid.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+        origin_ids = (
+            getattr(req, "origin_input_ids_unpadded", None)
+            or getattr(req, "origin_input_ids", ())
+            or ()
+        )
+        output_ids = getattr(req, "output_ids", ()) or ()
+        for token_id in tuple(origin_ids) + tuple(output_ids):
+            digest.update(int(token_id).to_bytes(8, "little", signed=True))
+        sampling_params = getattr(req, "sampling_params", None)
+        for name in ("temperature", "top_k", "top_p"):
+            value = getattr(sampling_params, name, None)
+            if value is not None:
+                digest.update(repr(round(float(value), 8)).encode("ascii"))
+    return int.from_bytes(digest.digest(), "little") & ((1 << 63) - 1)
 
 
 def make_group_verify_input(

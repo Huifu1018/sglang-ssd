@@ -123,6 +123,8 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 
 注意：如果使用 `--tp-size > 1`、`--sglang-group-draft-backend sglang` 和 `async-hit`，后台 draft 不能再走 TP collective；否则 target decode 和 draft proposal 在同一组 rank 上并发发起 NCCL collective 时，可能因为跨 rank 顺序不一致而卡死。当前默认 `--sglang-group-native-draft-tp-mode auto` 会在这种场景下为每张 GPU 加载一个 draft 单卡副本，避免后台 draft 参与 TP/NCCL collective。这个模式会增加 draft 显存占用，但不会自动降级到 `async-sync-fallback`。
 
+启动日志里应该能看到 `Created replicated SGLANG_GROUP draft TP group` 和 `draft_tp_mode=replica`。如果仍然看到 `Created independent SGLANG_GROUP draft TP group`，说明运行的不是修复后的 async-hit 多卡路径，或者显式设置了 `--sglang-group-native-draft-tp-mode independent`。
+
 多卡 TP 场景示例：
 
 ```bash
@@ -232,6 +234,7 @@ temperature >= 0.9     -> itl-base-tli
 
 如果 `async-hit` 请求明显变慢，优先看：
 
+- 启动日志是否是 `Created replicated SGLANG_GROUP draft TP group`。`async-hit + tp_size > 1` 不应使用 `independent` draft TP。
 - `async.inflight` 是否持续增长。
 - `async.latest_skips_due_to_inflight` 是否持续增长，表示 draft proposal 跟不上 target decode。
 - `async.stale_drops` 是否持续增长，表示旧前缀 proposal 正在被丢弃，避免继续抢占 GPU。

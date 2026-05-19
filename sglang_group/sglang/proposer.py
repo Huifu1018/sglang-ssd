@@ -476,12 +476,23 @@ class HeterogeneousDraftProposer:
         generation_past = self._fork_past_key_values(state.past_key_values)
         logits = state.next_token_logits
         context_len = len(state.input_ids)
+        generator = self._tli_sampling_generator(
+            rid=rid,
+            context_ids=state.input_ids,
+            max_draft_tokens=max_draft_tokens,
+            sampling=sampling,
+            device=logits.device,
+        )
 
         try:
             with torch.inference_mode():
                 for _ in range(max_draft_tokens):
                     target_probs, selected_assistant_id, selected_target_id = (
-                        self._sample_tli_token(logits, sampling=sampling)
+                        self._sample_tli_token(
+                            logits,
+                            sampling=sampling,
+                            generator=generator,
+                        )
                     )
                     prob_rows.append(target_probs)
                     draft_ids.append(selected_assistant_id)
@@ -506,7 +517,12 @@ class HeterogeneousDraftProposer:
                 # token. SGLang's tree verifier uses it for the target-only bonus
                 # position and requires a row-aligned probability tensor.
                 if prob_rows:
-                    target_probs, _, _ = self._sample_tli_token(logits, sampling=sampling)
+                    target_probs, _, _ = self._sample_tli_token(
+                        logits,
+                        sampling=sampling,
+                        generator=generator,
+                        sample_token=False,
+                    )
                     prob_rows.append(target_probs)
         finally:
             self._rollback_past_key_values(generation_past)
@@ -523,7 +539,14 @@ class HeterogeneousDraftProposer:
             target_tree_parent_indices=_linear_tree_parent_indices(len(target_ids)),
         )
 
-    def _sample_tli_token(self, logits, *, sampling: SamplingRequest):
+    def _sample_tli_token(
+        self,
+        logits,
+        *,
+        sampling: SamplingRequest,
+        generator=None,
+        sample_token: bool = True,
+    ):
         import torch
 
         assert self._valid_assistant_ids is not None
@@ -542,10 +565,12 @@ class HeterogeneousDraftProposer:
         probs = torch.softmax(scaled, dim=-1)
         probs = _renormalize_top_k_top_p(probs, top_k=sampling.top_k, top_p=sampling.top_p)
 
-        if sampling.temperature <= 0:
+        if not sample_token or sampling.temperature <= 0:
             index = int(torch.argmax(probs).item())
         else:
-            index = int(torch.multinomial(probs, num_samples=1).item())
+            index = int(
+                torch.multinomial(probs, num_samples=1, generator=generator).item()
+            )
 
         target_probs = torch.zeros(
             (self.target_vocab_size,),
@@ -558,6 +583,30 @@ class HeterogeneousDraftProposer:
             int(valid_assistant_ids[index].item()),
             int(valid_target_ids[index].item()),
         )
+
+    def _tli_sampling_generator(
+        self,
+        *,
+        rid: str,
+        context_ids: Sequence[int],
+        max_draft_tokens: int,
+        sampling: SamplingRequest,
+        device,
+    ):
+        import torch
+
+        seed = _tli_sampling_seed(
+            rid=rid,
+            context_ids=context_ids,
+            max_draft_tokens=max_draft_tokens,
+            sampling=sampling,
+        )
+        try:
+            generator = torch.Generator(device=device)
+        except TypeError:
+            generator = torch.Generator()
+        generator.manual_seed(seed)
+        return generator
 
     def _ensure_intersection_tensors(self) -> None:
         import torch
@@ -1042,6 +1091,32 @@ def _hash_ints(token_ids: Sequence[int]) -> str:
     for token_id in token_ids:
         digest.update(int(token_id).to_bytes(8, "little", signed=True))
     return digest.hexdigest()
+
+
+def _tli_sampling_seed(
+    *,
+    rid: str,
+    context_ids: Sequence[int],
+    max_draft_tokens: int,
+    sampling: SamplingRequest,
+) -> int:
+    """Return a stable proposal RNG seed shared by all TP ranks.
+
+    Replicated draft runners must emit identical candidate tokens on every
+    target TP rank. Python's hash() is process-randomized, so derive the seed
+    from explicit request fields instead.
+    """
+
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(str(rid).encode("utf-8", errors="surrogatepass"))
+    digest.update(b"\0")
+    for token_id in context_ids:
+        digest.update(int(token_id).to_bytes(8, "little", signed=True))
+    digest.update(int(max_draft_tokens).to_bytes(8, "little", signed=True))
+    digest.update(repr(_normalize_float(sampling.temperature)).encode("ascii"))
+    digest.update(int(sampling.top_k).to_bytes(8, "little", signed=True))
+    digest.update(repr(_normalize_float(sampling.top_p)).encode("ascii"))
+    return int.from_bytes(digest.digest(), "little") & ((1 << 63) - 1)
 
 
 def _linear_tree_parent_indices(length: int) -> tuple[int, ...]:
