@@ -158,8 +158,8 @@ class SGLangGroupWorker:
     """SGLang worker integrating ITL, SLEM, and TLI proposal methods.
 
     `auto` mode is batch-level on SGLang 0.5.9: greedy batches use
-    `itl-base-slem`, mid-temperature sampling uses `itl-base-tli`, and
-    high-temperature sampling uses `itl` by default.
+    `itl-base-slem`, and sampling batches use `itl-base-tli` so the verifier has
+    real draft probabilities.
     Target verification, KV slot allocation, request mutation, and output
     post-processing reuse SGLang's NGRAM spec-v1 verifier.
     """
@@ -186,6 +186,7 @@ class SGLangGroupWorker:
         self.max_draft_token_num = int(server_args.speculative_num_draft_tokens)
         self.speculative_num_draft_tokens = self.max_draft_token_num
         self.device = f"cuda:{gpu_id}" if gpu_id >= 0 else "cuda"
+        self._warned_sampling_method_fallback = False
 
         self.config = GroupSGLangConfig.from_env(default_draft_device=self.device)
         if self.config.disable_cuda_graph and hasattr(server_args, "disable_cuda_graph"):
@@ -207,6 +208,15 @@ class SGLangGroupWorker:
                 config=self.config,
                 trust_remote_code=bool(server_args.trust_remote_code),
             )
+
+        if self._async_hit_needs_tp_safe_fallback(server_args):
+            logger.warning(
+                "SGLANG_GROUP async-hit with SGLang-native draft is unsafe when "
+                "tp_size=%s because background draft collectives can interleave with "
+                "target collectives. Falling back to async-sync-fallback for this worker.",
+                getattr(server_args, "tp_size", 1),
+            )
+            self.config = replace(self.config, ssd_mode="async-sync-fallback")
 
         self.proposer = HeterogeneousDraftProposer(
             draft_model_path=server_args.speculative_draft_model_path,
@@ -264,6 +274,13 @@ class SGLangGroupWorker:
 
     def list_external_corpora(self) -> dict[str, int]:
         return {}
+
+    def _async_hit_needs_tp_safe_fallback(self, server_args: ServerArgs) -> bool:
+        return (
+            self.config.ssd_mode == "async-hit"
+            and self.config.draft_backend == "sglang"
+            and int(getattr(server_args, "tp_size", 1) or 1) > 1
+        )
 
     def post_process_batch_result_prefill(self, batch: ScheduleBatch, result) -> None:
         self._schedule_after_scheduler_commit(batch)
@@ -593,11 +610,15 @@ class SGLangGroupWorker:
             is_all_greedy=batch.sampling_info.is_all_greedy,
             max_temperature=max_temperature,
         )
-        if method == "itl-base-slem" and not batch.sampling_info.is_all_greedy:
-            raise ValueError(
-                "SGLANG_GROUP_METHOD=itl-base-slem supports greedy decoding only. "
-                "Use SGLANG_GROUP_METHOD=auto, itl, or itl-base-tli for sampling."
-            )
+        if not batch.sampling_info.is_all_greedy and method in {"itl", "itl-base-slem"}:
+            if not self._warned_sampling_method_fallback:
+                logger.warning(
+                    "SGLANG_GROUP routes non-greedy sampling through itl-base-tli for "
+                    "correct draft probabilities. Use greedy decoding for "
+                    "itl/itl-base-slem."
+                )
+                self._warned_sampling_method_fallback = True
+            method = "itl-base-tli"
         return method
 
     def _prepare_for_speculative_decoding(self, batch: ScheduleBatch, *, method: str) -> bool:

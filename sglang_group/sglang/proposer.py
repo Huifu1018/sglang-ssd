@@ -851,20 +851,22 @@ class HeterogeneousDraftProposer:
         assistant_context_ids: Sequence[int],
         max_target_tokens: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        greedy = tuple(int(token_id) for token_id in greedy_target_ids[:max_target_tokens])
+        branch_factor = int(getattr(self.config, "tree_branch_factor", 1) or 1)
+        max_depth = getattr(self.config, "tree_max_depth", None)
+        greedy_budget = int(max_target_tokens)
+        if branch_factor > 1 and max_target_tokens > 1:
+            sibling_budget = min(branch_factor - 1, max_target_tokens - 1)
+            greedy_budget = max(1, max_target_tokens - sibling_budget)
+        if max_depth is not None:
+            max_depth = max(1, int(max_depth))
+            greedy_budget = min(greedy_budget, max_depth)
+
+        greedy = tuple(int(token_id) for token_id in greedy_target_ids[:greedy_budget])
         tokens: list[int] = list(greedy)
         parents: list[int] = list(_linear_tree_parent_indices(len(greedy)))
 
-        branch_factor = int(getattr(self.config, "tree_branch_factor", 1) or 1)
         if branch_factor <= 1 or max_target_tokens <= 1:
             return tuple(tokens), tuple(parents)
-
-        max_depth = getattr(self.config, "tree_max_depth", None)
-        if max_depth is not None:
-            max_depth = max(1, int(max_depth))
-            keep = min(len(tokens), max_depth)
-            tokens = tokens[:keep]
-            parents = parents[:keep]
 
         budget = max(0, max_target_tokens - len(tokens))
         if budget <= 0:

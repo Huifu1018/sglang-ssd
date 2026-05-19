@@ -175,7 +175,7 @@ class GroupSGLangConfig:
     method: str = "auto"
     auto_greedy_method: str = "itl-base-slem"
     auto_mid_sampling_method: str = "itl-base-tli"
-    auto_high_sampling_method: str = "itl"
+    auto_high_sampling_method: str = "itl-base-tli"
     auto_high_temp_threshold: float = 0.9
     draft_backend: str = "sglang"
     draft_device: str | None = None
@@ -228,9 +228,9 @@ class GroupSGLangConfig:
         auto_high_sampling_method = normalize_group_method(
             _env_value(
                 "SGLANG_GROUP_AUTO_HIGH_SAMPLING_METHOD",
-                default="itl",
+                default="itl-base-tli",
             )
-            or "itl"
+            or "itl-base-tli"
         )
         return cls(
             method=method,

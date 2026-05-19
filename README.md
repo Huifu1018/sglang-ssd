@@ -121,6 +121,8 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 
 在 `async-hit` 下，proposal cache hit 的请求会走 speculative verify，miss 的请求会走安全的 root-only verify fallback。
 
+注意：如果使用 `--tp-size > 1` 且 draft backend 是 `sglang`，后台 draft 线程会涉及 tensor-parallel collective。为了避免 draft collective 和 target collective 在不同 rank 上乱序导致 watchdog 卡死，当前实现会把 `async-hit` 自动降级为 `async-sync-fallback` 的同步安全路径。单卡或非 TP draft 后端才会启用真正后台 async-hit。
+
 ## 基线对比
 
 建议同时启动一个 target-only SGLang server 作为基线：
@@ -166,13 +168,14 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 ```text
 temperature == 0       -> itl-base-slem
 0 < temperature < 0.9  -> itl-base-tli
-temperature >= 0.9     -> itl
+temperature >= 0.9     -> itl-base-tli
 ```
 
 说明：
 
 - `itl-base-slem` 与 `itl` 会把 Qwen draft ids retokenize 成 MiniMax target ids 后再 verify。
 - `itl-base-tli` 会限制在共享 token string 上计算 draft probability，再 scatter 到 target vocab。
+- 非 greedy sampling 会强制路由到 `itl-base-tli`，避免 `itl` / `itl-base-slem` 缺少 draft probability 时破坏输出分布。
 - 异构 tokenizer 场景下，`--sglang-group-tokenizer-bridge uag` 是推荐起点。
 
 ## 需要重点观察的指标

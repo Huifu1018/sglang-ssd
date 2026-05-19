@@ -24,7 +24,7 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             config.method_for_batch(is_all_greedy=False, max_temperature=1.0),
-            "itl",
+            "itl-base-tli",
         )
 
     def test_method_aliases(self):

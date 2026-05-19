@@ -279,6 +279,38 @@ class ProposalResultCacheTests(unittest.TestCase):
         self.assertEqual(parents, (0, 0))
         self.assertEqual(proposer.stats.tree_proposals, 1)
 
+    def test_tree_builder_reserves_budget_for_root_siblings(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        proposer = self._new_proposer(
+            GroupSGLangConfig(tree_branch_factor=3, tree_max_depth=3)
+        )
+        proposer.target_tokenizer = TinyTokenizer(
+            {"hello": 1, " world": 2, "!": 3, "?": 4}
+        )
+        proposer.draft_tokenizer = TinyTokenizer(
+            {"hello": 10, " world": 11, "!": 12, "?": 13}
+        )
+        logits = torch.zeros((1, 16))
+        logits[0, 11] = 10
+        logits[0, 12] = 9
+        logits[0, 13] = 8
+
+        tokens, parents = proposer._tree_from_greedy_with_root_siblings(
+            root_logits=logits,
+            greedy_target_ids=(2, 2, 2, 2),
+            current_target_ids=(1,),
+            assistant_context_ids=(10,),
+            max_target_tokens=4,
+        )
+
+        self.assertEqual(tokens, (2, 2, 3, 4))
+        self.assertEqual(parents, (0, 1, 0, 0))
+        self.assertEqual(proposer.stats.tree_proposals, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
