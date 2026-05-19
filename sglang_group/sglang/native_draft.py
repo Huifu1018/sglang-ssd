@@ -258,6 +258,7 @@ class SGLangNativeDraftBackend:
         self._cached_input_ids: tuple[int, ...] = ()
         self._native_kv_cache_disabled_reason: str | None = None
         self._forward_lock: RLock | None = None
+        self._forward_gate: object | None = None
 
         logger.info(
             "Initialized SGLang-native draft backend: draft=%s, device=%s, "
@@ -376,6 +377,9 @@ class SGLangNativeDraftBackend:
 
     def set_forward_lock(self, lock: RLock | None) -> None:
         self._forward_lock = lock
+
+    def set_forward_gate(self, gate: object | None) -> None:
+        self._forward_gate = gate
 
     def _create_draft_tp_group(self):
         if int(getattr(self.server_args, "tp_size", 1) or 1) <= 1:
@@ -637,6 +641,12 @@ class SGLangNativeDraftBackend:
 
     @contextmanager
     def _locked_forward_context(self):
+        if self._forward_gate is not None:
+            draft_context = getattr(self._forward_gate, "draft_context", None)
+            if callable(draft_context):
+                with draft_context():
+                    yield
+                return
         if self._forward_lock is None:
             yield
             return

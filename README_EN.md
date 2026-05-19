@@ -149,14 +149,15 @@ The native backend does not inherit the target model quantization. For example, 
 --sglang-group-native-draft-quantization awq
 ```
 
-By default, the SGLang-native draft backend rebuilds the current draft-side
-context for every proposal. This costs more draft-side work, but avoids repeated
-outputs and abnormal acceptance rates when SGLang internal `ScheduleBatch` / KV
-allocator rollback is incomplete.
+In SSD modes, the SGLang-native draft backend enables accepted-context KV reuse
+by default. This avoids rebuilding the full draft-side context for every
+proposal. Rollback validation still checks `ScheduleBatch`, request state, the
+allocator state, and the `req_to_token` row; if validation fails, the cache is
+cleared and later proposals fall back to safe rebuild.
 
 `SGLANG_GROUP_ENABLE_DRAFT_CACHE` still controls the HF `past_key_values` cache
 for the Transformers backend. For the SGLang-native backend, accepted-context
-draft KV caching is now experimental and must be enabled explicitly:
+draft KV caching can still be enabled explicitly:
 
 ```bash
 --sglang-group-enable-native-draft-kv-cache
@@ -170,8 +171,12 @@ When enabled:
 - On the next proposal, the accepted target text is re-tokenized and the draft suffix is committed into the draft cache.
 - If rollback validation finds inconsistent `seq_lens`, `kv_committed_len`, or `kv_allocated_len`, the native draft KV cache is cleared and disabled, and later proposals fall back to safe rebuild.
 
-If enabling this experimental flag causes repeated output, `acceptance rate=1.0`,
-or degraded text, disable the flag and keep the default safe rebuild path.
+If this path causes repeated output, `acceptance rate=1.0`, or degraded text,
+disable it with:
+
+```bash
+--no-sglang-group-native-draft-kv-cache
+```
 
 For concurrent requests, the implementation is conservative: it keeps one active draft session, and a different request id triggers rebuild. For high-concurrency tests, keep `--sglang-group-max-context-tokens`, for example `4096` or `8192`. Multi-request LRU native draft caching can be added later.
 
@@ -207,11 +212,12 @@ Periodic logs include:
 - `proposal_cache_hits` / `proposal_cache_misses` / `proposal_cache_skips`
 - `accepted_on_proposal_cache_hit` / `accepted_on_proposal_cache_miss`
 - `draft_cache_hits` / `draft_cache_extensions` / `draft_cache_rebuilds`
+- `async.sync_directs` / `async.wait_hits`
 - `proposal_cache_size`
 
 These metrics answer whether the cache is hit, whether cached proposals are
 accepted by the target verifier, and whether the runtime is still using the
-default safe rebuild path.
+safe rebuild path or extending accepted draft KV state.
 
 ## Method Selection
 
@@ -320,7 +326,8 @@ through SGLang. For controlled comparisons, pass
 | `--sglang-group-native-draft-quantization` | `SGLANG_GROUP_NATIVE_DRAFT_QUANTIZATION` | unset | Draft quantization override for SGLang-native backend. |
 | `--sglang-group-native-draft-cache-tokens` | `SGLANG_GROUP_NATIVE_DRAFT_CACHE_TOKENS` | derived | Draft KV pool tokens for SGLang-native backend. |
 | `--sglang-group-native-draft-max-requests` | `SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS` | `1` | Draft request pool size for SGLang-native backend. |
-| `--sglang-group-enable-native-draft-kv-cache` | `SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE=true` | disabled | Experimental SGLang-native accepted-context KV cache with rollback validation and automatic fallback; disabled by default for correctness. |
+| `--sglang-group-enable-native-draft-kv-cache` | `SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE=true` | auto for SSD | SGLang-native accepted-context KV cache with rollback validation and automatic fallback. |
+| `--no-sglang-group-native-draft-kv-cache` | `SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE=false` | unset | Disable SGLang-native accepted-context KV cache and use rebuild per proposal. |
 | `--sglang-group-max-draft-tokens` | `SGLANG_GROUP_MAX_DRAFT_TOKENS` | derived | Max draft autoregressive steps per proposal. |
 | `--sglang-group-max-context-tokens` | `SGLANG_GROUP_MAX_CONTEXT_TOKENS` | unset | Truncate draft-side context before proposal. |
 | `--sglang-group-dtw-window` | `SGLANG_GROUP_DTW_WINDOW` | `8` | DTW window for `itl` diagnostics. |
@@ -344,7 +351,7 @@ through SGLang. For controlled comparisons, pass
 - Multimodal requests fall back to target-only verification for that request.
 - `itl-base-slem` is greedy only.
 - SGLang-native draft backend does not support HF `device_map`.
-- Current SGLang-native draft KV cache is experimental and disabled by default; when enabled it is still one active request cache, not multi-request LRU.
+- Current SGLang-native draft KV cache is one active request cache, not multi-request LRU.
 
 ## Development Checks
 

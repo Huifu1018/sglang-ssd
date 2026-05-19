@@ -67,6 +67,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.tree_branch_factor, 1)
         self.assertIsNone(config.tree_max_depth)
 
+    def test_native_kv_cache_defaults_on_for_ssd_sglang_backend(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "SGLANG_GROUP_DRAFT_BACKEND": "sglang",
+                "SGLANG_GROUP_SSD_MODE": "async-hit",
+            },
+        ):
+            config = GroupSGLangConfig.from_env()
+            self.assertTrue(config.native_draft_kv_cache)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SGLANG_GROUP_DRAFT_BACKEND": "sglang",
+                "SGLANG_GROUP_SSD_MODE": "async-hit",
+                "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE": "0",
+            },
+        ):
+            config = GroupSGLangConfig.from_env()
+            self.assertFalse(config.native_draft_kv_cache)
+
     def test_env_validation(self):
         with patch.dict("os.environ", {"SGLANG_GROUP_METHOD": "bad"}):
             with self.assertRaises(ValueError):

@@ -275,6 +275,24 @@ class AsyncProposalServiceTests(unittest.TestCase):
         finally:
             service.shutdown()
 
+    def test_sync_fallback_direct_path_stores_ready_proposal(self):
+        proposer = FakeProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        try:
+            request = _request(rid="r-direct", target_ids=(7, 8))
+
+            proposal = service.propose_sync(request)
+            ready = service.get_ready(request)
+
+            self.assertEqual(proposal.proposal_cache_event, "async-hit")
+            self.assertIsNotNone(ready)
+            self.assertEqual(len(proposer.calls), 1)
+            stats = service.snapshot()
+            self.assertEqual(stats["sync_fallbacks"], 1)
+            self.assertEqual(stats["sync_directs"], 1)
+        finally:
+            service.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

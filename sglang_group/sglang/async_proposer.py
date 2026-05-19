@@ -66,6 +66,7 @@ class AsyncProposalStats:
     cache_evictions: int = 0
     evicted_by_request: int = 0
     sync_fallbacks: int = 0
+    sync_directs: int = 0
     wait_hits: int = 0
     cuda_pending: int = 0
     stale_drops: int = 0
@@ -253,7 +254,14 @@ class AsyncProposalService:
 
         proposal = self._run_proposal(request)
         self._wait_for_proposal_event(proposal)
-        return proposal
+        with self._state_lock:
+            self._cache[key] = proposal
+            self._cache.move_to_end(key)
+            self.stats.sync_directs += 1
+            while len(self._cache) > self.max_entries:
+                self._cache.popitem(last=False)
+                self.stats.cache_evictions += 1
+        return self._ready_proposal(proposal, "async-sync")
 
     def collect_finished(self) -> None:
         with self._state_lock:

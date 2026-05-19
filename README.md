@@ -177,6 +177,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 | `--sglang-group-method` | `auto` | `itl`、`itl-base-slem`、`itl-base-tli` 或按 temperature 自动路由。 |
 | `--sglang-group-draft-backend` | `sglang` | draft 模型通过 SGLang 低层 `ModelRunner` 执行。 |
 | `--sglang-group-native-draft-tp-mode` | `auto` | `auto`、`replica` 或 `independent`。`async-hit + tp_size>1` 下 `auto` 会选 `replica`，每张 GPU 一个 draft 副本，避免并发 TP/NCCL 卡死。 |
+| `--no-sglang-group-native-draft-kv-cache` | 默认不关闭 | SSD 模式下 SGLang-native draft 默认启用 accepted-context KV 复用，减少每轮 proposal 重复 prefill；如遇到 cache 校验失败或输出异常，可用该开关退回安全 rebuild。 |
 | `--sglang-group-ssd-mode` | `off` | `off`、`async-hit` 或 `async-sync-fallback`。 |
 | `--sglang-group-ssd-prefetch-workers` | `1` | 后台 proposal worker 数量。 |
 | `--sglang-group-ssd-max-prefetch` | `256` | 异步 proposal 完成缓存大小。 |
@@ -184,7 +185,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 | `--sglang-group-tokenizer-bridge` | `uag` | UAG/lookbehind retokenization 或 segment-only retokenization。 |
 | `--sglang-group-tree-branch-factor` | `1` | root top-k branch factor；branch/tree 测试建议设为 `4`。 |
 | `--sglang-group-tree-max-depth` | 未设置 | verifier tree 最大深度上限。 |
-| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。当前 `draft_backend=sglang` 会自动关闭 stream/event overlap，并用进程内 forward lock 保护 target/draft 的 SGLang runtime parallel state，避免 scheduler watchdog 卡死。 |
+| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。当前 `draft_backend=sglang` 会自动关闭 stream/event overlap，并用 target 优先的进程内 forward gate 保护 target/draft 的 SGLang runtime parallel state，避免 scheduler watchdog 卡死和后台 draft 抢占 target decode。 |
 | `--sglang-group-max-context-tokens` | 未设置 | 限制 draft 侧上下文长度。 |
 | `--sglang-group-metrics-log-interval` | `60` | 周期性 metrics log 间隔，设为 `0` 可关闭。 |
 
@@ -229,6 +230,7 @@ temperature >= 0.9     -> itl-base-tli
 - `async.stale_drops`
 - `async.latest_skips_due_to_inflight`
 - `async.sync_fallbacks`
+- `async.sync_directs`
 - `async.wait_hits`
 - `async.proposal_run_ms_avg`
 - `async.proposal_run_ms_max`
@@ -245,6 +247,7 @@ temperature >= 0.9     -> itl-base-tli
 - `proposal_cache_hits` / `async.ready_hits` 是否长期为 0。修复后的 `async.shift_hits` 会统计“旧前缀 proposal 后缀复用”的命中；如果 `ready_hits` 和 `shift_hits` 都长期为 0，当前负载下 async-hit 基本只是在后台空跑 draft，需要降低 draft 成本、提高 proposal 提前量，或换更贴近 target 的 draft。
 - `async-sync-fallback` 下 `async.ready_hits` 不是核心指标；主要看 `async.sync_fallbacks`、`async.wait_hits`、`proposal_cache_hits` 和 `acceptance_rate`。
 - 如果启动时看到 `disabled CUDA stream/event overlap for the SGLang-native draft backend`，这是当前 native draft 后端的稳定性保护；Transformers draft 后端仍可使用 CUDA stream/event overlap。
+- SSD + SGLang-native draft 下默认启用 accepted-context KV 复用。正常情况下 `draft_cache_extensions` 应逐步增加，`draft_cache_rebuilds` 不应每轮都增加；如果日志出现 `Disabled SGLang-native accepted-context draft KV cache`，说明校验发现状态不一致，后续会自动退回 rebuild。
 
 ## 当前限制
 
@@ -253,7 +256,7 @@ temperature >= 0.9     -> itl-base-tli
 - 暂不支持 DP attention。
 - branch generation 当前主要是 root top-k siblings + greedy branch，更深层多级 fork expansion 还需要继续开发。
 - sampling/TLI branch probability rows 当前仍偏线性，branch/tree 模式优先服务 greedy/text proposal path。
-- SGLang-native accepted-context draft KV cache 仍是实验功能，默认关闭。
+- SGLang-native accepted-context draft KV cache 默认只在 SSD 模式启用，并带 rollback 校验和自动 fallback；多请求 LRU native draft cache 还需要继续开发。
 - 是否达到最终极限性能，需要在目标 GPU、真实 batch/concurrency 和真实业务 prompt 上用 benchmark 验证，不能只靠代码路径判断。
 
 ## 验证

@@ -241,6 +241,12 @@ class GroupSGLangConfig:
             _env_value("SGLANG_GROUP_METHOD", default="auto") or "auto",
             allow_auto=True,
         )
+        draft_backend = normalize_draft_backend(
+            _env_value("SGLANG_GROUP_DRAFT_BACKEND", default="sglang") or "sglang"
+        )
+        ssd_mode = normalize_ssd_mode(
+            _env_value("SGLANG_GROUP_SSD_MODE", default="off") or "off"
+        )
         auto_greedy_method = normalize_group_method(
             _env_value("SGLANG_GROUP_AUTO_GREEDY_METHOD", default="itl-base-slem")
             or "itl-base-slem"
@@ -267,10 +273,7 @@ class GroupSGLangConfig:
             auto_high_temp_threshold=(
                 _env_float("SGLANG_GROUP_AUTO_HIGH_TEMP_THRESHOLD", 0.9) or 0.9
             ),
-            draft_backend=normalize_draft_backend(
-                _env_value("SGLANG_GROUP_DRAFT_BACKEND", default="sglang")
-                or "sglang"
-            ),
+            draft_backend=draft_backend,
             draft_device=os.getenv("SGLANG_GROUP_DRAFT_DEVICE", default_draft_device),
             draft_device_map=os.getenv("SGLANG_GROUP_DRAFT_DEVICE_MAP") or None,
             draft_dtype=os.getenv("SGLANG_GROUP_DRAFT_DTYPE", "auto"),
@@ -285,7 +288,8 @@ class GroupSGLangConfig:
                 _env_int("SGLANG_GROUP_NATIVE_DRAFT_MAX_REQUESTS", 1) or 1
             ),
             native_draft_kv_cache=_env_bool(
-                "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE", False
+                "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE",
+                draft_backend == "sglang" and ssd_mode != "off",
             ),
             native_draft_tp_mode=normalize_native_draft_tp_mode(
                 _env_value("SGLANG_GROUP_NATIVE_DRAFT_TP_MODE", default="auto")
@@ -307,9 +311,7 @@ class GroupSGLangConfig:
             ),
             tli_min_intersection=_env_int("SGLANG_GROUP_TLI_MIN_INTERSECTION", 1) or 1,
             metrics_log_interval=_env_float("SGLANG_GROUP_METRICS_LOG_INTERVAL", 60.0),
-            ssd_mode=normalize_ssd_mode(
-                _env_value("SGLANG_GROUP_SSD_MODE", default="off") or "off"
-            ),
+            ssd_mode=ssd_mode,
             ssd_prefetch_workers=(
                 _env_int("SGLANG_GROUP_SSD_PREFETCH_WORKERS", 1) or 1
             ),

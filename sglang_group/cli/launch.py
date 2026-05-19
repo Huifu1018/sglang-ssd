@@ -62,6 +62,10 @@ GROUP_BOOL_FLAGS = {
         "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE",
         "true",
     ),
+    "--no-sglang-group-native-draft-kv-cache": (
+        "SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE",
+        "false",
+    ),
     "--no-sglang-group-cuda-overlap": ("SGLANG_GROUP_ENABLE_CUDA_OVERLAP", "false"),
 }
 
@@ -188,9 +192,14 @@ def main(argv: list[str] | None = None) -> None:
             "--sglang-group-enable-native-draft-kv-cache",
             action="store_true",
             help=(
-                "Enable experimental accepted-context KV reuse for backend=sglang. "
-                "Default is safe rebuild per proposal."
+                "Enable accepted-context KV reuse for backend=sglang. This is "
+                "enabled automatically for SSD modes and kept for explicit opt-in."
             ),
+        )
+        parser.add_argument(
+            "--no-sglang-group-native-draft-kv-cache",
+            action="store_true",
+            help="Disable accepted-context KV reuse for backend=sglang.",
         )
         parser.add_argument(
             "--sglang-group-max-cached-proposals",

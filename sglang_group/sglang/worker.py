@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from threading import RLock
+from threading import Condition, Lock
 from time import monotonic
 from typing import Optional
 
@@ -39,6 +40,46 @@ from .proposer import BaseProposal, HeterogeneousDraftProposer, SamplingRequest
 from .verify_input import make_group_verify_input
 
 logger = logging.getLogger(__name__)
+
+
+class _NativeForwardGate:
+    """Serialize native draft/target forwards while giving target decode priority."""
+
+    def __init__(self) -> None:
+        self._condition = Condition(Lock())
+        self._active = False
+        self._target_waiters = 0
+
+    @contextmanager
+    def target_context(self):
+        with self._condition:
+            self._target_waiters += 1
+            try:
+                while self._active:
+                    self._condition.wait()
+                self._active = True
+            finally:
+                self._target_waiters -= 1
+                self._condition.notify_all()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
+
+    @contextmanager
+    def draft_context(self):
+        with self._condition:
+            while self._active or self._target_waiters > 0:
+                self._condition.wait()
+            self._active = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
 
 
 @dataclass
@@ -210,11 +251,13 @@ class SGLangGroupWorker:
                 trust_remote_code=bool(server_args.trust_remote_code),
             )
 
-        self._native_forward_lock = RLock() if native_backend is not None else None
+        self._native_forward_gate = (
+            _NativeForwardGate() if native_backend is not None else None
+        )
         if native_backend is not None:
-            set_forward_lock = getattr(native_backend, "set_forward_lock", None)
-            if callable(set_forward_lock):
-                set_forward_lock(self._native_forward_lock)
+            set_forward_gate = getattr(native_backend, "set_forward_gate", None)
+            if callable(set_forward_gate):
+                set_forward_gate(self._native_forward_gate)
 
         self._validate_async_hit_tp_safety(server_args, native_backend)
 
@@ -237,7 +280,8 @@ class SGLangGroupWorker:
                     "SGLANG_GROUP disabled CUDA stream/event overlap for the "
                     "SGLang-native draft backend in this build. Native draft "
                     "forward shares SGLang runtime parallel state with target "
-                    "forward, so stream-level overlap can stall the scheduler."
+                    "forward, so stream-level overlap can stall the scheduler. "
+                    "A target-priority forward gate is used instead."
                 )
             self.cuda_overlap = CudaStreamOverlapController(
                 enabled=cuda_overlap_enabled,
@@ -473,9 +517,9 @@ class SGLangGroupWorker:
         )
 
     def _forward_target_worker(self, *args, **kwargs):
-        if self._native_forward_lock is None:
+        if self._native_forward_gate is None:
             return self.target_worker.forward_batch_generation(*args, **kwargs)
-        with self._native_forward_lock:
+        with self._native_forward_gate.target_context():
             return self.target_worker.forward_batch_generation(*args, **kwargs)
 
     def _maybe_forward_mixed_async_hit(
@@ -739,7 +783,6 @@ class SGLangGroupWorker:
                         else:
                             async_misses += 1
                             if self.config.ssd_mode == "async-sync-fallback":
-                                self.async_proposer.submit(async_request)
                                 proposal = self.async_proposer.propose_sync(async_request)
                     else:
                         proposal = self.proposer.propose(

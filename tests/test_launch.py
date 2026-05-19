@@ -95,6 +95,16 @@ class LaunchTests(unittest.TestCase):
         self.assertIn("--disable-cuda-graph", rewritten)
         self.assertIn("--disable-overlap-schedule", rewritten)
 
+    def test_can_disable_native_draft_kv_cache(self):
+        environ = {}
+        remaining = _consume_group_args(
+            ["--no-sglang-group-native-draft-kv-cache", "--model-path", "target"],
+            environ=environ,
+        )
+
+        self.assertEqual(remaining, ["--model-path", "target"])
+        self.assertEqual(environ["SGLANG_GROUP_ENABLE_NATIVE_DRAFT_KV_CACHE"], "false")
+
     def test_installs_child_process_patch_hook(self):
         environ = {"PYTHONPATH": os.pathsep.join(["/existing/path"])}
 
