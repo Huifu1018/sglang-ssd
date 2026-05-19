@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from threading import RLock
 from time import monotonic
 from typing import Optional
 
@@ -209,6 +210,12 @@ class SGLangGroupWorker:
                 trust_remote_code=bool(server_args.trust_remote_code),
             )
 
+        self._native_forward_lock = RLock() if native_backend is not None else None
+        if native_backend is not None:
+            set_forward_lock = getattr(native_backend, "set_forward_lock", None)
+            if callable(set_forward_lock):
+                set_forward_lock(self._native_forward_lock)
+
         self._validate_async_hit_tp_safety(server_args, native_backend)
 
         self.proposer = HeterogeneousDraftProposer(
@@ -223,8 +230,17 @@ class SGLangGroupWorker:
         self.async_proposer = None
         self.cuda_overlap = None
         if self.config.ssd_mode != "off":
+            cuda_overlap_enabled = bool(self.config.cuda_overlap)
+            if native_backend is not None and cuda_overlap_enabled:
+                cuda_overlap_enabled = False
+                logger.warning(
+                    "SGLANG_GROUP disabled CUDA stream/event overlap for the "
+                    "SGLang-native draft backend in this build. Native draft "
+                    "forward shares SGLang runtime parallel state with target "
+                    "forward, so stream-level overlap can stall the scheduler."
+                )
             self.cuda_overlap = CudaStreamOverlapController(
-                enabled=self.config.cuda_overlap,
+                enabled=cuda_overlap_enabled,
                 device=self.device,
             )
             self.async_proposer = AsyncProposalService(
@@ -317,7 +333,7 @@ class SGLangGroupWorker:
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             model_worker_batch = batch.get_model_worker_batch()
             extend_start = monotonic()
-            batch_result = self.target_worker.forward_batch_generation(model_worker_batch)
+            batch_result = self._forward_target_worker(model_worker_batch)
             self.stats.extend_wall_time_s += monotonic() - extend_start
             return _make_generation_result(
                 logits_output=batch_result.logits_output,
@@ -368,7 +384,7 @@ class SGLangGroupWorker:
 
             set_time_batch(batch.reqs, "set_spec_verify_start_time", trace_only=True)
             target_verify_start = monotonic()
-            batch_result = self.target_worker.forward_batch_generation(
+            batch_result = self._forward_target_worker(
                 model_worker_batch,
                 is_verify=True,
             )
@@ -439,7 +455,7 @@ class SGLangGroupWorker:
             if not spec_prepared:
                 self.stats.spec_skip_batches += 1
             target_only_start = monotonic()
-            batch_result = self.target_worker.forward_batch_generation(model_worker_batch)
+            batch_result = self._forward_target_worker(model_worker_batch)
             self.stats.target_only_wall_time_s += monotonic() - target_only_start
             logits_output, next_token_ids, can_run_cuda_graph = (
                 batch_result.logits_output,
@@ -455,6 +471,12 @@ class SGLangGroupWorker:
             can_run_cuda_graph=can_run_cuda_graph,
             accept_lens=accept_lens,
         )
+
+    def _forward_target_worker(self, *args, **kwargs):
+        if self._native_forward_lock is None:
+            return self.target_worker.forward_batch_generation(*args, **kwargs)
+        with self._native_forward_lock:
+            return self.target_worker.forward_batch_generation(*args, **kwargs)
 
     def _maybe_forward_mixed_async_hit(
         self,

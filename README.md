@@ -184,7 +184,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 | `--sglang-group-tokenizer-bridge` | `uag` | UAG/lookbehind retokenization 或 segment-only retokenization。 |
 | `--sglang-group-tree-branch-factor` | `1` | root top-k branch factor；branch/tree 测试建议设为 `4`。 |
 | `--sglang-group-tree-max-depth` | 未设置 | verifier tree 最大深度上限。 |
-| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。 |
+| `--no-sglang-group-cuda-overlap` | 默认关闭该开关 | 关闭 draft proposal CUDA stream/event overlap。当前 `draft_backend=sglang` 会自动关闭 stream/event overlap，并用进程内 forward lock 保护 target/draft 的 SGLang runtime parallel state，避免 scheduler watchdog 卡死。 |
 | `--sglang-group-max-context-tokens` | 未设置 | 限制 draft 侧上下文长度。 |
 | `--sglang-group-metrics-log-interval` | `60` | 周期性 metrics log 间隔，设为 `0` 可关闭。 |
 
@@ -244,6 +244,7 @@ temperature >= 0.9     -> itl-base-tli
 - `async.stale_drops` 是否持续增长。修复后的 async-hit 会保留可滑动命中的旧 proposal；如果仍持续增长，说明旧 proposal 的前几个 token 和 target 实际输出不一致，无法复用。
 - `proposal_cache_hits` / `async.ready_hits` 是否长期为 0。修复后的 `async.shift_hits` 会统计“旧前缀 proposal 后缀复用”的命中；如果 `ready_hits` 和 `shift_hits` 都长期为 0，当前负载下 async-hit 基本只是在后台空跑 draft，需要降低 draft 成本、提高 proposal 提前量，或换更贴近 target 的 draft。
 - `async-sync-fallback` 下 `async.ready_hits` 不是核心指标；主要看 `async.sync_fallbacks`、`async.wait_hits`、`proposal_cache_hits` 和 `acceptance_rate`。
+- 如果启动时看到 `disabled CUDA stream/event overlap for the SGLang-native draft backend`，这是当前 native draft 后端的稳定性保护；Transformers draft 后端仍可使用 CUDA stream/event overlap。
 
 ## 当前限制
 

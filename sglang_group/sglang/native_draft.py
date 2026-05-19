@@ -15,6 +15,7 @@ import dataclasses
 import logging
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from threading import RLock
 from types import SimpleNamespace
 from typing import Sequence
 
@@ -256,6 +257,7 @@ class SGLangNativeDraftBackend:
         self._cached_rid: str | None = None
         self._cached_input_ids: tuple[int, ...] = ()
         self._native_kv_cache_disabled_reason: str | None = None
+        self._forward_lock: RLock | None = None
 
         logger.info(
             "Initialized SGLang-native draft backend: draft=%s, device=%s, "
@@ -371,6 +373,9 @@ class SGLangNativeDraftBackend:
         return self.draft_tp_mode == "replica" and (
             self.target_tp_size <= 1 or self.draft_tp_group is not None
         )
+
+    def set_forward_lock(self, lock: RLock | None) -> None:
+        self._forward_lock = lock
 
     def _create_draft_tp_group(self):
         if int(getattr(self.server_args, "tp_size", 1) or 1) <= 1:
@@ -619,11 +624,24 @@ class SGLangNativeDraftBackend:
     def _forward_batch(self, batch: object) -> object:
         from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
-        self._maybe_prepare_mlp_sync_batch(batch)
-        model_worker_batch = batch.get_model_worker_batch()
-        forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-        logits_output = self.model_runner.forward(forward_batch).logits_output
-        return logits_output.next_token_logits
+        with self._locked_forward_context():
+            with self._draft_tp_init_context():
+                self._maybe_prepare_mlp_sync_batch(batch)
+                model_worker_batch = batch.get_model_worker_batch()
+                forward_batch = ForwardBatch.init_new(
+                    model_worker_batch,
+                    self.model_runner,
+                )
+                logits_output = self.model_runner.forward(forward_batch).logits_output
+                return logits_output.next_token_logits
+
+    @contextmanager
+    def _locked_forward_context(self):
+        if self._forward_lock is None:
+            yield
+            return
+        with self._forward_lock:
+            yield
 
     def _maybe_prepare_mlp_sync_batch(self, batch: object) -> None:
         try:
