@@ -220,9 +220,20 @@ temperature >= 0.9     -> itl-base-tli
 - `draft_cache_hits`
 - `async.cache_size`
 - `async.inflight`
+- `async.stale_drops`
+- `async.latest_skips_due_to_inflight`
+- `async.proposal_run_ms_avg`
+- `async.proposal_run_ms_max`
 - `async.cuda_overlap`
 - `tree_proposals`
 - `tree_nodes`
+
+如果 `async-hit` 请求明显变慢，优先看：
+
+- `async.inflight` 是否持续增长。
+- `async.latest_skips_due_to_inflight` 是否持续增长，表示 draft proposal 跟不上 target decode。
+- `async.stale_drops` 是否持续增长，表示旧前缀 proposal 正在被丢弃，避免继续抢占 GPU。
+- `proposal_cache_hits` / `async.ready_hits` 是否长期为 0；如果长期为 0，当前负载下 async-hit 基本只是在后台空跑 draft，需要降低 draft 成本或提高 proposal 提前量。
 
 ## 当前限制
 
@@ -244,6 +255,6 @@ PYTHONPATH=. python -m unittest discover -s tests -p "test_*.py"
 当前本地验证结果：
 
 ```text
-Ran 54 tests
+Ran 56 tests
 OK (skipped=6)
 ```

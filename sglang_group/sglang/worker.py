@@ -511,10 +511,9 @@ class SGLangGroupWorker:
                 continue
             try:
                 current_ids = self._current_target_ids(req)
-                current_text = self._decode_target(current_ids)
                 request = AsyncProposalRequest(
                     rid=str(req.rid),
-                    current_text=current_text,
+                    current_text=self._lazy_target_text(current_ids),
                     current_target_ids=current_ids,
                     max_target_tokens=max_target_tokens,
                     method=method,
@@ -701,10 +700,10 @@ class SGLangGroupWorker:
             if getattr(req, "multimodal_inputs", None) is None:
                 try:
                     current_ids = self._current_target_ids(req)
-                    current_text = self._decode_target(current_ids)
+                    lazy_current_text = self._lazy_target_text(current_ids)
                     async_request = AsyncProposalRequest(
                         rid=str(req.rid),
-                        current_text=current_text,
+                        current_text=lazy_current_text,
                         current_target_ids=current_ids,
                         max_target_tokens=max_target_tokens,
                         method=method,
@@ -716,13 +715,13 @@ class SGLangGroupWorker:
                             proposal = ready
                         else:
                             async_misses += 1
-                            self.async_proposer.submit(async_request)
                             if self.config.ssd_mode == "async-sync-fallback":
+                                self.async_proposer.submit(async_request)
                                 proposal = self.async_proposer.propose_sync(async_request)
                     else:
                         proposal = self.proposer.propose(
                             str(req.rid),
-                            current_text,
+                            lazy_current_text(),
                             current_ids,
                             max_target_tokens=max_target_tokens,
                             method=method,
@@ -839,17 +838,18 @@ class SGLangGroupWorker:
                 continue
             try:
                 current_ids = self._current_target_ids(req)
-                current_text = self._decode_target(current_ids)
-                self.async_proposer.submit(
-                    AsyncProposalRequest(
-                        rid=str(req.rid),
-                        current_text=current_text,
-                        current_target_ids=current_ids,
-                        max_target_tokens=max_target_tokens,
-                        method=method,
-                        sampling=self._sampling_request(batch, idx),
-                    )
+                async_request = AsyncProposalRequest(
+                    rid=str(req.rid),
+                    current_text=self._lazy_target_text(current_ids),
+                    current_target_ids=current_ids,
+                    max_target_tokens=max_target_tokens,
+                    method=method,
+                    sampling=self._sampling_request(batch, idx),
                 )
+                if self.config.ssd_mode == "async-hit":
+                    self.async_proposer.submit_latest(async_request)
+                else:
+                    self.async_proposer.submit(async_request)
             except Exception:
                 logger.exception(
                     "SGLANG_GROUP SSD prefetch failed for request %s", req.rid
@@ -943,6 +943,9 @@ class SGLangGroupWorker:
             )
         except TypeError:
             return tokenizer.decode(list(token_ids))
+
+    def _lazy_target_text(self, token_ids: tuple[int, ...]):
+        return lambda token_ids=tuple(token_ids): self._decode_target(token_ids)
 
     def _sampling_request(self, batch: ScheduleBatch, index: int) -> SamplingRequest:
         sampling_info = batch.sampling_info

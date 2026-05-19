@@ -23,7 +23,9 @@ class FakeProposer:
         method,
         sampling,
     ):
-        self.calls.append((rid, tuple(current_target_ids), method, sampling.temperature))
+        self.calls.append(
+            (rid, str(current_text), tuple(current_target_ids), method, sampling.temperature)
+        )
         return BaseProposal(
             method=method,
             draft_token_ids=(11, 12),
@@ -70,11 +72,63 @@ class AsyncProposalServiceTests(unittest.TestCase):
             self.assertIsNotNone(proposal)
             self.assertEqual(proposal.proposal_cache_event, "async-hit")
             self.assertEqual(proposal.target_token_ids, (100, 101))
+            self.assertEqual(proposer.calls[0][1], "hello")
             stats = service.snapshot()
             self.assertEqual(stats["submitted"], 1)
             self.assertEqual(stats["completed"], 1)
             self.assertEqual(stats["submit_skips"], 1)
             self.assertEqual(stats["ready_hits"], 1)
+        finally:
+            service.shutdown()
+
+    def test_ready_checks_do_not_resolve_lazy_text(self):
+        proposer = FakeProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        resolved = []
+
+        def lazy_text():
+            resolved.append(True)
+            return "lazy"
+
+        try:
+            request = AsyncProposalRequest(
+                rid="lazy-rid",
+                current_text=lazy_text,
+                current_target_ids=(1, 2),
+                max_target_tokens=2,
+                method="itl",
+                sampling=SamplingRequest(temperature=0.0),
+            )
+
+            self.assertFalse(service.has_ready(request))
+            self.assertIsNone(service.get_ready(request))
+            self.assertEqual(resolved, [])
+
+            self.assertTrue(service.submit_latest(request))
+            service.drain(timeout_s=1.0)
+            self.assertEqual(resolved, [True])
+            self.assertEqual(proposer.calls[0][1], "lazy")
+        finally:
+            service.shutdown()
+
+    def test_submit_latest_drops_stale_cached_prefix(self):
+        proposer = FakeProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        try:
+            stale = _request(rid="r-stale", target_ids=(1, 2))
+            latest = _request(rid="r-stale", target_ids=(1, 2, 3))
+
+            self.assertTrue(service.submit_latest(stale))
+            service.drain(timeout_s=1.0)
+            self.assertTrue(service.has_ready(stale))
+
+            self.assertTrue(service.submit_latest(latest))
+            self.assertFalse(service.has_ready(stale))
+            service.drain(timeout_s=1.0)
+            self.assertTrue(service.has_ready(latest))
+
+            stats = service.snapshot()
+            self.assertEqual(stats["stale_drops"], 1)
         finally:
             service.shutdown()
 

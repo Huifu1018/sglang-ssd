@@ -8,7 +8,7 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from threading import Lock
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .proposer import BaseProposal, SamplingRequest
 
@@ -29,7 +29,7 @@ class AsyncProposalKey:
 @dataclass(frozen=True)
 class AsyncProposalRequest:
     rid: str
-    current_text: str
+    current_text: str | Callable[[], str]
     current_target_ids: tuple[int, ...]
     max_target_tokens: int
     method: str
@@ -47,6 +47,11 @@ class AsyncProposalRequest:
             top_p=round(float(self.sampling.top_p), 6),
         )
 
+    def resolve_current_text(self) -> str:
+        if callable(self.current_text):
+            return str(self.current_text())
+        return str(self.current_text)
+
 
 @dataclass
 class AsyncProposalStats:
@@ -62,9 +67,20 @@ class AsyncProposalStats:
     sync_fallbacks: int = 0
     wait_hits: int = 0
     cuda_pending: int = 0
+    stale_drops: int = 0
+    latest_skips_due_to_inflight: int = 0
+    proposal_runs: int = 0
+    proposal_run_wall_time_s: float = 0.0
+    proposal_max_run_wall_time_s: float = 0.0
 
     def snapshot(self) -> dict[str, object]:
-        return self.__dict__.copy()
+        data = self.__dict__.copy()
+        if self.proposal_runs:
+            data["proposal_run_ms_avg"] = (
+                self.proposal_run_wall_time_s * 1000.0 / self.proposal_runs
+            )
+            data["proposal_run_ms_max"] = self.proposal_max_run_wall_time_s * 1000.0
+        return data
 
 
 class AsyncProposalService:
@@ -131,6 +147,46 @@ class AsyncProposalService:
             if key in self._cache or key in self._inflight:
                 self.stats.submit_skips += 1
                 return False
+            future = self._executor.submit(self._run_proposal, request)
+            self._inflight[key] = future
+            self.stats.submitted += 1
+            return True
+
+    def submit_latest(self, request: AsyncProposalRequest) -> bool:
+        """Submit only the newest prefix for one request.
+
+        async-hit proposals are useful only for the exact next scheduler step.
+        Once a request has advanced, older prefixes are stale and should not sit
+        in the executor queue competing with target decoding.
+        """
+
+        key = request.key
+        self.collect_finished()
+        with self._state_lock:
+            if key in self._cache or key in self._inflight:
+                self.stats.submit_skips += 1
+                return False
+
+            for old_key in list(self._cache.keys()):
+                if old_key.rid == key.rid:
+                    self._cache.pop(old_key, None)
+                    self.stats.stale_drops += 1
+
+            for old_key, future in list(self._inflight.items()):
+                if old_key.rid != key.rid:
+                    continue
+                if future.cancel():
+                    self._inflight.pop(old_key, None)
+                    self.stats.cancelled += 1
+                    self.stats.stale_drops += 1
+                    continue
+
+                # A stale proposal is already running. Queueing another one for
+                # the same request usually makes async-hit fall behind further.
+                self.stats.submit_skips += 1
+                self.stats.latest_skips_due_to_inflight += 1
+                return False
+
             future = self._executor.submit(self._run_proposal, request)
             self._inflight[key] = future
             self.stats.submitted += 1
@@ -278,18 +334,29 @@ class AsyncProposalService:
             with self._proposer_lock:
                 return self.proposer.propose(
                     request.rid,
-                    request.current_text,
+                    request.resolve_current_text(),
                     request.current_target_ids,
                     max_target_tokens=request.max_target_tokens,
                     method=request.method,
                     sampling=request.sampling,
                 )
 
-        if self.cuda_overlap is not None:
-            run_on_stream = getattr(self.cuda_overlap, "run", None)
-            if callable(run_on_stream):
-                return run_on_stream(run)
-        return run()
+        start = time.monotonic()
+        try:
+            if self.cuda_overlap is not None:
+                run_on_stream = getattr(self.cuda_overlap, "run", None)
+                if callable(run_on_stream):
+                    return run_on_stream(run)
+            return run()
+        finally:
+            elapsed = time.monotonic() - start
+            with self._state_lock:
+                self.stats.proposal_runs += 1
+                self.stats.proposal_run_wall_time_s += elapsed
+                self.stats.proposal_max_run_wall_time_s = max(
+                    self.stats.proposal_max_run_wall_time_s,
+                    elapsed,
+                )
 
     def _proposal_event_complete(self, proposal: BaseProposal) -> bool:
         if self.cuda_overlap is None:
