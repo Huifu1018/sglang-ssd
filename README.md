@@ -119,7 +119,7 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 --sglang-group-ssd-mode async-hit
 ```
 
-在 `async-hit` 下，proposal cache hit 的请求会走 speculative verify，miss 的请求会走安全的 root-only verify fallback。
+在 `async-hit` 下，proposal cache hit 的请求会走 speculative verify，miss 的请求会直接回到普通 target decode；不会再把无候选的 root-only 输入送进 verifier。已完成但前缀落后一两个 token 的 proposal 会尝试做滑动命中，命中后继续使用未消费的候选后缀。
 
 注意：如果使用 `--tp-size > 1`、`--sglang-group-draft-backend sglang` 和 `async-hit`，后台 draft 不能再走 TP collective；否则 target decode 和 draft proposal 在同一组 rank 上并发发起 NCCL collective 时，可能因为跨 rank 顺序不一致而卡死。当前默认 `--sglang-group-native-draft-tp-mode auto` 会在这种场景下为每张 GPU 加载一个 draft 单卡副本，避免后台 draft 参与 TP/NCCL collective。这个模式会增加 draft 显存占用，但不会自动降级到 `async-sync-fallback`。
 
@@ -224,8 +224,12 @@ temperature >= 0.9     -> itl-base-tli
 - `draft_cache_hits`
 - `async.cache_size`
 - `async.inflight`
+- `async.ready_hits`
+- `async.shift_hits`
 - `async.stale_drops`
 - `async.latest_skips_due_to_inflight`
+- `async.sync_fallbacks`
+- `async.wait_hits`
 - `async.proposal_run_ms_avg`
 - `async.proposal_run_ms_max`
 - `async.cuda_overlap`
@@ -237,8 +241,9 @@ temperature >= 0.9     -> itl-base-tli
 - 启动日志是否是 `Created replicated SGLANG_GROUP draft TP group`。`async-hit + tp_size > 1` 不应使用 `independent` draft TP。
 - `async.inflight` 是否持续增长。
 - `async.latest_skips_due_to_inflight` 是否持续增长，表示 draft proposal 跟不上 target decode。
-- `async.stale_drops` 是否持续增长，表示旧前缀 proposal 正在被丢弃，避免继续抢占 GPU。
-- `proposal_cache_hits` / `async.ready_hits` 是否长期为 0；如果长期为 0，当前负载下 async-hit 基本只是在后台空跑 draft，需要降低 draft 成本或提高 proposal 提前量。
+- `async.stale_drops` 是否持续增长。修复后的 async-hit 会保留可滑动命中的旧 proposal；如果仍持续增长，说明旧 proposal 的前几个 token 和 target 实际输出不一致，无法复用。
+- `proposal_cache_hits` / `async.ready_hits` 是否长期为 0。修复后的 `async.shift_hits` 会统计“旧前缀 proposal 后缀复用”的命中；如果 `ready_hits` 和 `shift_hits` 都长期为 0，当前负载下 async-hit 基本只是在后台空跑 draft，需要降低 draft 成本、提高 proposal 提前量，或换更贴近 target 的 draft。
+- `async-sync-fallback` 下 `async.ready_hits` 不是核心指标；主要看 `async.sync_fallbacks`、`async.wait_hits`、`proposal_cache_hits` 和 `acceptance_rate`。
 
 ## 当前限制
 
@@ -260,6 +265,6 @@ PYTHONPATH=. python -m unittest discover -s tests -p "test_*.py"
 当前本地验证结果：
 
 ```text
-Ran 60 tests
-OK (skipped=6)
+Ran 69 tests
+OK (skipped=8)
 ```

@@ -81,6 +81,82 @@ class AsyncProposalServiceTests(unittest.TestCase):
         finally:
             service.shutdown()
 
+    def test_ready_hit_can_shift_completed_prefix(self):
+        proposer = FakeProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        try:
+            request = _request(target_ids=(1, 2))
+            shifted_request = _request(target_ids=(1, 2, 100))
+            mismatch_request = _request(target_ids=(1, 2, 999))
+
+            self.assertTrue(service.submit_latest(request))
+            service.drain(timeout_s=1.0)
+
+            self.assertFalse(service.has_ready(mismatch_request))
+            self.assertTrue(service.has_ready(shifted_request))
+            proposal = service.get_ready(shifted_request)
+
+            self.assertIsNotNone(proposal)
+            self.assertEqual(proposal.proposal_cache_event, "async-hit")
+            self.assertEqual(proposal.target_token_ids, (101,))
+            self.assertEqual(proposal.draft_token_ids, (12,))
+            self.assertEqual(proposal.target_tree_token_ids, (101,))
+            self.assertEqual(proposal.target_tree_parent_indices, (0,))
+            self.assertTrue(proposal.cache_event.startswith("async-shift/"))
+            stats = service.snapshot()
+            self.assertEqual(stats["ready_hits"], 1)
+            self.assertEqual(stats["shift_hits"], 1)
+        finally:
+            service.shutdown()
+
+    def test_submit_latest_keeps_shiftable_cached_prefix(self):
+        proposer = FakeProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        try:
+            request = _request(target_ids=(1, 2))
+            shifted_request = _request(target_ids=(1, 2, 100))
+
+            self.assertTrue(service.submit_latest(request))
+            service.drain(timeout_s=1.0)
+            self.assertTrue(service.submit_latest(shifted_request))
+
+            self.assertTrue(service.has_ready(shifted_request))
+            self.assertEqual(service.snapshot()["stale_drops"], 0)
+        finally:
+            service.shutdown()
+
+    def test_shifted_tli_proposal_trims_probability_rows(self):
+        class TliProposer(FakeProposer):
+            def propose(self, *args, **kwargs):
+                proposal = super().propose(*args, **kwargs)
+                return BaseProposal(
+                    method="itl-base-tli",
+                    draft_token_ids=(11, 12),
+                    target_token_ids=(100, 101),
+                    draft_prob_rows=("p0", "p1", "p2"),
+                    cache_event=proposal.cache_event,
+                    draft_context_tokens=proposal.draft_context_tokens,
+                    proposal_cache_event=proposal.proposal_cache_event,
+                    tokenizer_bridge="tli",
+                )
+
+        proposer = TliProposer()
+        service = AsyncProposalService(proposer, max_workers=1, max_entries=4)
+        try:
+            request = _request(target_ids=(1, 2), method="itl-base-tli")
+            shifted_request = _request(target_ids=(1, 2, 100), method="itl-base-tli")
+
+            self.assertTrue(service.submit_latest(request))
+            service.drain(timeout_s=1.0)
+            proposal = service.get_ready(shifted_request)
+
+            self.assertIsNotNone(proposal)
+            self.assertEqual(proposal.target_token_ids, (101,))
+            self.assertEqual(proposal.draft_prob_rows, ("p1", "p2"))
+            self.assertEqual(proposal.draft_token_ids, (12,))
+        finally:
+            service.shutdown()
+
     def test_ready_checks_do_not_resolve_lazy_text(self):
         proposer = FakeProposer()
         service = AsyncProposalService(proposer, max_workers=1, max_entries=4)

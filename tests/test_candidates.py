@@ -35,6 +35,23 @@ class CandidateRowTests(unittest.TestCase):
         self.assertEqual(rows.draft_cache_events, ("rebuild",))
         self.assertEqual(rows.proposal_methods, ("itl",))
 
+    def test_linear_empty_candidate_rows_skip_verify(self):
+        rows = build_linear_candidate_rows(
+            [10],
+            [[]],
+            max_draft_token_num=4,
+            proposal_cache_events=["async-miss"],
+            draft_cache_events=["async-miss"],
+            proposal_methods=["itl-base-slem"],
+        )
+
+        self.assertEqual(rows.rows, ())
+        self.assertEqual(rows.draft_token_num, 1)
+        self.assertEqual(rows.proposed_target_tokens, 0)
+        self.assertEqual(rows.proposal_cache_events, ("async-miss",))
+        self.assertEqual(rows.draft_cache_events, ("async-miss",))
+        self.assertEqual(rows.proposal_methods, ("itl-base-slem",))
+
     def test_builds_tree_candidate_rows(self):
         rows = build_tree_candidate_rows(
             [5],
@@ -47,6 +64,24 @@ class CandidateRowTests(unittest.TestCase):
         self.assertEqual(rows.rows, ((5, 7, 8, 9),))
         self.assertEqual(rows.parent_rows, ((-1, 0, 1, 0),))
         self.assertEqual(rows.depth_rows, ((0, 1, 2, 1),))
+
+    def test_tree_empty_candidate_rows_skip_verify(self):
+        rows = build_tree_candidate_rows(
+            [5],
+            [[]],
+            [[]],
+            max_draft_token_num=4,
+            proposal_cache_events=["async-miss"],
+            draft_cache_events=["async-miss"],
+            proposal_methods=["itl-base-slem"],
+        )
+
+        self.assertEqual(rows.rows, ())
+        self.assertEqual(rows.draft_token_num, 1)
+        self.assertEqual(rows.proposed_target_tokens, 0)
+        self.assertEqual(rows.proposal_cache_events, ("async-miss",))
+        self.assertEqual(rows.draft_cache_events, ("async-miss",))
+        self.assertEqual(rows.proposal_methods, ("itl-base-slem",))
 
 
 if __name__ == "__main__":

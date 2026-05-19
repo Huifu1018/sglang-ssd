@@ -58,6 +58,7 @@ class AsyncProposalStats:
     submitted: int = 0
     submit_skips: int = 0
     ready_hits: int = 0
+    shift_hits: int = 0
     ready_misses: int = 0
     completed: int = 0
     failed: int = 0
@@ -117,29 +118,34 @@ class AsyncProposalService:
         self.collect_finished()
         with self._state_lock:
             proposal = self._cache.get(key)
-            if proposal is None:
-                self.stats.ready_misses += 1
-                return None
-            if not self._proposal_event_complete(proposal):
-                self.stats.ready_misses += 1
+            if proposal is not None:
+                if not self._proposal_event_complete(proposal):
+                    self.stats.ready_misses += 1
+                    self.stats.cuda_pending += 1
+                    return None
+                self._cache.move_to_end(key)
+                self.stats.ready_hits += 1
+                return self._ready_proposal(proposal, "async-hit")
+
+            shifted, pending = self._find_shifted_ready_locked(key)
+            if shifted is not None:
+                self.stats.ready_hits += 1
+                self.stats.shift_hits += 1
+                return shifted
+            self.stats.ready_misses += 1
+            if pending:
                 self.stats.cuda_pending += 1
-                return None
-            self._cache.move_to_end(key)
-            self.stats.ready_hits += 1
-            return replace(
-                proposal,
-                cache_event=f"async-hit/{proposal.cache_event}",
-                proposal_cache_event="async-hit",
-            )
+            return None
 
     def has_ready(self, request: AsyncProposalRequest) -> bool:
         key = request.key
         self.collect_finished()
         with self._state_lock:
             proposal = self._cache.get(key)
-            if proposal is None:
-                return False
-            return self._proposal_event_complete(proposal)
+            if proposal is not None:
+                return self._proposal_event_complete(proposal)
+            shifted, _ = self._find_shifted_ready_locked(key)
+            return shifted is not None
 
     def submit(self, request: AsyncProposalRequest) -> bool:
         key = request.key
@@ -155,9 +161,10 @@ class AsyncProposalService:
     def submit_latest(self, request: AsyncProposalRequest) -> bool:
         """Submit only the newest prefix for one request.
 
-        async-hit proposals are useful only for the exact next scheduler step.
-        Once a request has advanced, older prefixes are stale and should not sit
-        in the executor queue competing with target decoding.
+        Exact matches are best, but a completed proposal for an older prefix can
+        still be used if the target has consumed a prefix of its candidate row.
+        Such shiftable cache entries are kept; entries that cannot match the
+        newest target prefix are dropped.
         """
 
         key = request.key
@@ -169,6 +176,13 @@ class AsyncProposalService:
 
             for old_key in list(self._cache.keys()):
                 if old_key.rid == key.rid:
+                    old_proposal = self._cache.get(old_key)
+                    if (
+                        old_proposal is not None
+                        and self._shift_proposal_for_key(old_key, old_proposal, key)
+                        is not None
+                    ):
+                        continue
                     self._cache.pop(old_key, None)
                     self.stats.stale_drops += 1
 
@@ -202,11 +216,14 @@ class AsyncProposalService:
                 self._cache.move_to_end(key)
                 self.stats.ready_hits += 1
                 self._wait_for_proposal_event(proposal)
-                return replace(
-                    proposal,
-                    cache_event=f"async-hit/{proposal.cache_event}",
-                    proposal_cache_event="async-hit",
-                )
+                return self._ready_proposal(proposal, "async-hit")
+
+            shifted, _ = self._find_shifted_ready_locked(key)
+            if shifted is not None:
+                self.stats.ready_hits += 1
+                self.stats.shift_hits += 1
+                return shifted
+
             future = self._inflight.get(key)
 
         if future is not None:
@@ -232,11 +249,7 @@ class AsyncProposalService:
                     self._cache.popitem(last=False)
                     self.stats.cache_evictions += 1
             self._wait_for_proposal_event(proposal)
-            return replace(
-                proposal,
-                cache_event=f"async-wait/{proposal.cache_event}",
-                proposal_cache_event="async-hit",
-            )
+            return self._ready_proposal(proposal, "async-wait")
 
         proposal = self._run_proposal(request)
         self._wait_for_proposal_event(proposal)
@@ -372,3 +385,93 @@ class AsyncProposalService:
         wait_for_event = getattr(self.cuda_overlap, "wait", None)
         if callable(wait_for_event):
             wait_for_event(proposal)
+
+    @staticmethod
+    def _ready_proposal(proposal: BaseProposal, prefix: str) -> BaseProposal:
+        return replace(
+            proposal,
+            cache_event=f"{prefix}/{proposal.cache_event}",
+            proposal_cache_event="async-hit",
+        )
+
+    def _find_shifted_ready_locked(
+        self,
+        key: AsyncProposalKey,
+    ) -> tuple[BaseProposal | None, bool]:
+        pending = False
+        for old_key in list(reversed(self._cache)):
+            proposal = self._cache[old_key]
+            shifted = self._shift_proposal_for_key(old_key, proposal, key)
+            if shifted is None:
+                continue
+            if not self._proposal_event_complete(proposal):
+                pending = True
+                continue
+            self._cache.move_to_end(old_key)
+            return shifted, pending
+        return None, pending
+
+    @staticmethod
+    def _shift_proposal_for_key(
+        old_key: AsyncProposalKey,
+        proposal: BaseProposal,
+        key: AsyncProposalKey,
+    ) -> BaseProposal | None:
+        if (
+            old_key.rid != key.rid
+            or old_key.method != key.method
+            or old_key.max_target_tokens != key.max_target_tokens
+            or old_key.temperature != key.temperature
+            or old_key.top_k != key.top_k
+            or old_key.top_p != key.top_p
+        ):
+            return None
+
+        old_prefix = tuple(int(token_id) for token_id in old_key.current_target_ids)
+        current = tuple(int(token_id) for token_id in key.current_target_ids)
+        if len(current) <= len(old_prefix):
+            return None
+        if current[: len(old_prefix)] != old_prefix:
+            return None
+
+        target_token_ids = tuple(int(token_id) for token_id in proposal.target_token_ids)
+        consumed_ids = current[len(old_prefix) :]
+        consumed = len(consumed_ids)
+        if consumed <= 0 or consumed >= len(target_token_ids):
+            return None
+        if target_token_ids[:consumed] != consumed_ids:
+            return None
+
+        remaining = target_token_ids[consumed:]
+        draft_prob_rows = _shift_draft_prob_rows(proposal.draft_prob_rows, consumed)
+        if proposal.draft_prob_rows is not None and draft_prob_rows is None:
+            return None
+
+        draft_token_ids = proposal.draft_token_ids
+        if (
+            proposal.tokenizer_bridge == "tli"
+            or len(proposal.draft_token_ids) == len(target_token_ids)
+        ):
+            draft_token_ids = tuple(proposal.draft_token_ids[consumed:])
+
+        return replace(
+            proposal,
+            draft_token_ids=tuple(int(token_id) for token_id in draft_token_ids),
+            target_token_ids=remaining,
+            draft_prob_rows=draft_prob_rows,
+            cache_event=f"async-shift/{proposal.cache_event}",
+            proposal_cache_event="async-hit",
+            target_tree_token_ids=remaining,
+            target_tree_parent_indices=tuple(range(len(remaining))),
+        )
+
+
+def _shift_draft_prob_rows(rows: object | None, consumed: int) -> object | None:
+    if rows is None:
+        return None
+    try:
+        if len(rows) <= consumed:  # type: ignore[arg-type]
+            return None
+        return rows[consumed:]  # type: ignore[index]
+    except TypeError:
+        return None

@@ -61,8 +61,13 @@ def build_linear_candidate_rows(
         proposed_target_tokens += len(clipped)
         raw_rows.append((int(root), *clipped))
 
-    if not raw_rows:
-        return CandidateRows(rows=(), draft_token_num=1, proposed_target_tokens=0)
+    if not raw_rows or min(len(row) for row in raw_rows) <= 1:
+        return _empty_candidate_rows(
+            proposal_cache_events=proposal_cache_events,
+            draft_cache_events=draft_cache_events,
+            proposal_methods=proposal_methods,
+            draft_prob_rows=draft_prob_rows,
+        )
 
     draft_token_num = max(1, min(len(row) for row in raw_rows))
     draft_token_num = min(draft_token_num, max_draft_token_num)
@@ -126,8 +131,13 @@ def build_tree_candidate_rows(
         raw_rows.append((int(root), *clipped_targets))
         raw_parents.append((-1, *clipped_parents))
 
-    if not raw_rows:
-        return CandidateRows(rows=(), draft_token_num=1, proposed_target_tokens=0)
+    if not raw_rows or min(len(row) for row in raw_rows) <= 1:
+        return _empty_candidate_rows(
+            proposal_cache_events=proposal_cache_events,
+            draft_cache_events=draft_cache_events,
+            proposal_methods=proposal_methods,
+            draft_prob_rows=draft_prob_rows,
+        )
 
     draft_token_num = max(1, min(len(row) for row in raw_rows))
     draft_token_num = min(draft_token_num, max_draft_token_num)
@@ -169,3 +179,21 @@ def _depth_row(parent_row: Sequence[int]) -> tuple[int, ...]:
         else:
             depths.append(depths[int(parent)] + 1)
     return tuple(depths)
+
+
+def _empty_candidate_rows(
+    *,
+    proposal_cache_events: Sequence[str] | None = None,
+    draft_cache_events: Sequence[str] | None = None,
+    proposal_methods: Sequence[str] | None = None,
+    draft_prob_rows: Sequence[object | None] | None = None,
+) -> CandidateRows:
+    return CandidateRows(
+        rows=(),
+        draft_token_num=1,
+        proposed_target_tokens=0,
+        draft_prob_rows=tuple(draft_prob_rows or ()),
+        proposal_cache_events=tuple(proposal_cache_events or ()),
+        draft_cache_events=tuple(draft_cache_events or ()),
+        proposal_methods=tuple(proposal_methods or ()),
+    )
