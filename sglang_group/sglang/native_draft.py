@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Sequence
@@ -234,6 +235,7 @@ class SGLangNativeDraftBackend:
             server_args.speculative_draft_model_path,
             trust_remote_code=trust_remote_code,
         )
+        self.draft_tp_group = self._create_independent_tp_group()
         self.model_runner = self._load_model_runner()
         self.device = self.model_runner.device
         self._cached_session: SGLangNativeDraftSession | None = None
@@ -243,13 +245,15 @@ class SGLangNativeDraftBackend:
 
         logger.info(
             "Initialized SGLang-native draft backend: draft=%s, device=%s, "
-            "tp_rank=%s, cache_tokens=%s, max_requests=%s, kv_cache=%s",
+            "tp_rank=%s, cache_tokens=%s, max_requests=%s, kv_cache=%s, "
+            "independent_tp_group=%s",
             server_args.speculative_draft_model_path,
             self.device,
             tp_rank,
             getattr(self.server_args, "draft_runner_cache_size", None),
             getattr(self.server_args, "max_num_reqs", None),
             bool(config.native_draft_kv_cache),
+            bool(self.has_independent_tp_group),
         )
 
     def _configure_scratch_cache_size(self, source_server_args: object) -> None:
@@ -309,25 +313,83 @@ class SGLangNativeDraftBackend:
             model_revision=self.server_args.revision,
             is_draft_model=False,
         )
-        return ModelRunner(
-            model_config=model_config,
-            mem_fraction_static=self.server_args.mem_fraction_static,
-            gpu_id=self.gpu_id,
-            tp_rank=self.tp_rank,
-            tp_size=self.server_args.tp_size,
-            moe_ep_rank=self.moe_ep_rank,
-            moe_ep_size=self.server_args.ep_size,
-            pp_rank=0,
-            pp_size=1,
-            nccl_port=self.nccl_port,
-            dp_rank=self.dp_rank,
-            attn_cp_rank=self.attn_cp_rank,
-            moe_dp_rank=self.moe_dp_rank,
-            server_args=self.server_args,
-            is_draft_worker=True,
-            req_to_token_pool=None,
-            token_to_kv_pool_allocator=None,
-        )
+        with self._draft_tp_init_context():
+            return ModelRunner(
+                model_config=model_config,
+                mem_fraction_static=self.server_args.mem_fraction_static,
+                gpu_id=self.gpu_id,
+                tp_rank=self.tp_rank,
+                tp_size=self.server_args.tp_size,
+                moe_ep_rank=self.moe_ep_rank,
+                moe_ep_size=self.server_args.ep_size,
+                pp_rank=0,
+                pp_size=1,
+                nccl_port=self.nccl_port,
+                dp_rank=self.dp_rank,
+                attn_cp_rank=self.attn_cp_rank,
+                moe_dp_rank=self.moe_dp_rank,
+                server_args=self.server_args,
+                is_draft_worker=True,
+                req_to_token_pool=None,
+                token_to_kv_pool_allocator=None,
+            )
+
+    @property
+    def has_independent_tp_group(self) -> bool:
+        return self.draft_tp_group is not None
+
+    def _create_independent_tp_group(self):
+        if int(getattr(self.server_args, "tp_size", 1) or 1) <= 1:
+            return None
+
+        try:
+            import torch.distributed as dist
+            from sglang.srt.distributed import get_tp_group
+            from sglang.srt.distributed.parallel_state import (
+                get_world_group,
+                init_model_parallel_group,
+            )
+
+            if not dist.is_available() or not dist.is_initialized():
+                return None
+
+            target_tp_group = get_tp_group()
+            world_group = get_world_group()
+            backend = dist.get_backend(world_group.device_group)
+            draft_tp_group = init_model_parallel_group(
+                [list(target_tp_group.ranks)],
+                target_tp_group.local_rank,
+                backend,
+                use_pynccl=True,
+                use_custom_allreduce=False,
+                use_message_queue_broadcaster=False,
+                use_mscclpp_allreduce=False,
+                use_torch_symm_mem_allreduce=False,
+                group_name="sglang_group_draft_tp",
+                pynccl_use_current_stream=True,
+            )
+            barrier = getattr(draft_tp_group, "barrier", None)
+            if callable(barrier):
+                barrier()
+            logger.info(
+                "Created independent SGLANG_GROUP draft TP group: ranks=%s",
+                getattr(draft_tp_group, "ranks", None),
+            )
+            return draft_tp_group
+        except Exception:
+            logger.exception("Failed to create independent SGLANG_GROUP draft TP group.")
+            return None
+
+    def _draft_tp_init_context(self):
+        if self.draft_tp_group is None:
+            return nullcontext()
+        try:
+            from sglang.srt.distributed.parallel_state import patch_tensor_parallel_group
+
+            return patch_tensor_parallel_group(self.draft_tp_group)
+        except Exception:
+            logger.exception("Failed to enter SGLANG_GROUP draft TP init context.")
+            return nullcontext()
 
     def clear(self) -> None:
         self._drop_cached_session()

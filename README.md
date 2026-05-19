@@ -121,7 +121,7 @@ CUDA_VISIBLE_DEVICES=0 sglang-group-launch \
 
 在 `async-hit` 下，proposal cache hit 的请求会走 speculative verify，miss 的请求会走安全的 root-only verify fallback。
 
-注意：如果使用 `--tp-size > 1` 且 draft backend 是 `sglang`，后台 draft 线程会涉及 tensor-parallel collective。为了避免 draft collective 和 target collective 在不同 rank 上乱序导致 watchdog 卡死，当前实现会把 `async-hit` 自动降级为 `async-sync-fallback` 的同步安全路径。单卡或非 TP draft 后端才会启用真正后台 async-hit。
+注意：如果使用 `--tp-size > 1` 且 draft backend 是 `sglang`，后台 draft 线程会涉及 tensor-parallel collective。当前实现会为 draft ModelRunner 创建独立 TP group/communicator，避免 draft collective 和 target collective 共用同一个 TP communicator 后乱序卡死。独立 draft TP group 创建失败时会启动失败，不会自动降级到 `async-sync-fallback`。
 
 ## 基线对比
 

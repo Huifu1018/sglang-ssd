@@ -209,14 +209,7 @@ class SGLangGroupWorker:
                 trust_remote_code=bool(server_args.trust_remote_code),
             )
 
-        if self._async_hit_needs_tp_safe_fallback(server_args):
-            logger.warning(
-                "SGLANG_GROUP async-hit with SGLang-native draft is unsafe when "
-                "tp_size=%s because background draft collectives can interleave with "
-                "target collectives. Falling back to async-sync-fallback for this worker.",
-                getattr(server_args, "tp_size", 1),
-            )
-            self.config = replace(self.config, ssd_mode="async-sync-fallback")
+        self._validate_async_hit_tp_safety(server_args, native_backend)
 
         self.proposer = HeterogeneousDraftProposer(
             draft_model_path=server_args.speculative_draft_model_path,
@@ -275,11 +268,32 @@ class SGLangGroupWorker:
     def list_external_corpora(self) -> dict[str, int]:
         return {}
 
-    def _async_hit_needs_tp_safe_fallback(self, server_args: ServerArgs) -> bool:
-        return (
+    def _validate_async_hit_tp_safety(
+        self,
+        server_args: ServerArgs,
+        native_backend: object | None,
+    ) -> None:
+        needs_independent_group = (
             self.config.ssd_mode == "async-hit"
             and self.config.draft_backend == "sglang"
             and int(getattr(server_args, "tp_size", 1) or 1) > 1
+        )
+        if not needs_independent_group:
+            return
+        if native_backend is not None and bool(
+            getattr(native_backend, "has_independent_tp_group", False)
+        ):
+            logger.info(
+                "SGLANG_GROUP async-hit is using an independent draft TP group "
+                "for tp_size=%s.",
+                getattr(server_args, "tp_size", 1),
+            )
+            return
+        raise RuntimeError(
+            "SGLANG_GROUP async-hit with draft_backend=sglang and tp_size > 1 "
+            "requires an independent draft TP group. The group could not be "
+            "created, so refusing to start instead of falling back or risking "
+            "NCCL collective deadlock."
         )
 
     def post_process_batch_result_prefill(self, batch: ScheduleBatch, result) -> None:

@@ -15,6 +15,14 @@ class NativeDraftSessionTests(unittest.TestCase):
         self.assertEqual(_ceil_to_page(7, 4), 8)
         self.assertEqual(_ceil_to_page(8, 4), 8)
 
+    def test_single_tp_does_not_create_independent_draft_group(self):
+        backend = object.__new__(SGLangNativeDraftBackend)
+        backend.server_args = SimpleNamespace(tp_size=1)
+        backend.draft_tp_group = None
+
+        self.assertIsNone(backend._create_independent_tp_group())
+        self.assertFalse(backend.has_independent_tp_group)
+
     def test_speculative_rollback_restores_batch_req_and_allocator(self):
         class FakeAllocator:
             def __init__(self):
